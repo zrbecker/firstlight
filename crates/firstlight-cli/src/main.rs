@@ -148,13 +148,16 @@ fn list(verbose: bool) -> Result<()> {
     }
     if cameras.is_empty() {
         println!("No cameras found.");
-        if !firstlight_touptek::sdk_available() {
-            println!("(This build has no Touptek SDK, so only simulated cameras appear.)");
-        }
+    } else {
+        report::print_camera_table(&cameras);
+    }
+    // Why the list may be short for reasons unrelated to what is plugged in.
+    for note in registry.notes() {
+        println!("note: {note}");
+    }
+    if cameras.is_empty() {
         return Ok(());
     }
-
-    report::print_camera_table(&cameras);
     if verbose {
         for camera in &cameras {
             println!();

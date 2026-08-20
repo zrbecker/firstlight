@@ -33,6 +33,10 @@ impl Backend for TouptekBackend {
         BACKEND_NAME
     }
 
+    fn unavailable_reason(&self) -> Option<String> {
+        Some(TouptekBackend::unavailable_reason())
+    }
+
     fn enumerate(&self) -> Result<Vec<CameraInfo>> {
         // Not an error: a build without the SDK legitimately has no Touptek
         // cameras, and the registry should not treat that as a failure.
@@ -54,6 +58,14 @@ mod tests {
     #[test]
     fn enumeration_is_empty_rather_than_failing() {
         assert!(TouptekBackend::new().enumerate().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_backend_explains_why_it_sees_nothing() {
+        // Without this, an empty camera list in the GUI is indistinguishable
+        // from a camera that is simply unplugged.
+        let reason = TouptekBackend::new().unavailable_reason().unwrap();
+        assert!(reason.contains("--features touptek"), "{reason}");
     }
 
     #[test]

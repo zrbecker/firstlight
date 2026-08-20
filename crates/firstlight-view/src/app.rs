@@ -18,6 +18,14 @@ use firstlight_core::worker::{
 /// value is always sent when the drag ends.
 const CONTROL_THROTTLE: Duration = Duration::from_millis(120);
 
+/// After sending a control change, ignore what the camera reports for that
+/// control for this long. A status snapshot arrives every 200 ms carrying the
+/// value read back from the camera, and a value we set 20 ms ago has usually
+/// not been applied and reported yet — adopting it would snap the slider back
+/// under the user's pointer, which is exactly what "the slider does not drag
+/// smoothly" looks like.
+const CONTROL_SETTLE: Duration = Duration::from_millis(600);
+
 /// Longest edge of the texture we upload. Larger frames are subsampled for
 /// display only — the recorded and saved data is always full resolution.
 const MAX_DISPLAY_EDGE: u32 = 1600;
@@ -79,6 +87,8 @@ pub struct FirstLightApp {
 
     pub cameras: Vec<CameraInfo>,
     pub enumeration_errors: Vec<String>,
+    /// Backends explaining why they cannot see anything in this build.
+    pub backend_notes: Vec<String>,
     pub selected: Option<CameraId>,
     pub controls: Vec<ControlInfo>,
     /// Slider positions. Kept separate from [`WorkerStatus::settings`] so a
@@ -86,6 +96,8 @@ pub struct FirstLightApp {
     /// pointer.
     pub values: BTreeMap<ControlId, i64>,
     pending: BTreeMap<ControlId, (i64, Instant)>,
+    /// Controls the user has touched recently; see [`CONTROL_SETTLE`].
+    editing: BTreeMap<ControlId, Instant>,
 
     pub status: WorkerStatus,
     pub log: VecDeque<LogLine>,
@@ -122,10 +134,12 @@ impl FirstLightApp {
             worker,
             cameras: Vec::new(),
             enumeration_errors: Vec::new(),
+            backend_notes: Vec::new(),
             selected: None,
             controls: Vec::new(),
             values: BTreeMap::new(),
             pending: BTreeMap::new(),
+            editing: BTreeMap::new(),
             status: WorkerStatus::default(),
             log: VecDeque::new(),
             texture: None,
@@ -162,9 +176,20 @@ impl FirstLightApp {
         }
     }
 
+    /// True while the user owns this control's value and the camera's own
+    /// reading must not overwrite it.
+    fn is_editing(&self, id: ControlId) -> bool {
+        self.pending.contains_key(&id)
+            || self
+                .editing
+                .get(&id)
+                .is_some_and(|since| since.elapsed() < CONTROL_SETTLE)
+    }
+
     /// Queue a control change; the actual send is throttled.
     pub fn set_control(&mut self, id: ControlId, value: i64, immediate: bool) {
         self.values.insert(id, value);
+        self.editing.insert(id, Instant::now());
         if immediate {
             self.pending.remove(&id);
             self.send(WorkerCommand::SetControl { id, value });
@@ -217,11 +242,16 @@ impl FirstLightApp {
                 break;
             };
             match update {
-                WorkerUpdate::Cameras { cameras, errors } => {
+                WorkerUpdate::Cameras {
+                    cameras,
+                    errors,
+                    notes,
+                } => {
                     for error in &errors {
                         self.push_log(LogKind::Warning, error.clone());
                     }
                     self.enumeration_errors = errors;
+                    self.backend_notes = notes;
                     // Keep the selection if that camera is still attached.
                     if let Some(selected) = &self.selected
                         && !cameras.iter().any(|c| &c.id == selected)
@@ -242,15 +272,16 @@ impl FirstLightApp {
                 }
                 WorkerUpdate::Status(status) => {
                     let status = *status;
-                    // Adopt the camera's values for anything not being dragged.
-                    if !self.pending.contains_key(&ControlId::ExposureUs) {
+                    // Adopt the camera's values, but never for a control the
+                    // user is currently working: their pointer wins.
+                    if !self.is_editing(ControlId::ExposureUs) {
                         self.values
                             .insert(ControlId::ExposureUs, status.settings.exposure_us as i64);
                     }
-                    if !self.pending.contains_key(&ControlId::Gain) {
+                    if !self.is_editing(ControlId::Gain) {
                         self.values.insert(ControlId::Gain, status.settings.gain);
                     }
-                    if !self.pending.contains_key(&ControlId::Offset) {
+                    if !self.is_editing(ControlId::Offset) {
                         self.values
                             .insert(ControlId::Offset, status.settings.offset);
                     }

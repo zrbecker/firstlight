@@ -307,3 +307,57 @@ fn geometry_changes_from_the_ui_reach_the_camera() {
             .is_some_and(|m| m.format == PixelFormat::Mono)
     });
 }
+
+#[test]
+fn a_build_without_a_vendor_sdk_says_so_instead_of_showing_an_empty_list() {
+    // The failure this prevents: a user with a camera plugged in sees only
+    // the simulator, with nothing on screen to suggest the build simply
+    // cannot see their hardware.
+    let backend = Arc::new(SimulatorBackend::single(
+        64,
+        48,
+        PixelFormat::Bayer(BayerPattern::Rggb),
+    ));
+    let registry = Registry::new()
+        .with(backend as Arc<dyn Backend>)
+        .with(Arc::new(firstlight_touptek::TouptekBackend::new()) as Arc<dyn Backend>);
+    let ctx = egui::Context::default();
+    let app = FirstLightApp::new(&ctx, registry);
+    let sim = SimulatorBackend::single(1, 1, PixelFormat::Mono)
+        .handle(0)
+        .unwrap();
+    let mut harness = Harness { ctx, app, sim };
+
+    harness.run_until("the backend note", |app| !app.backend_notes.is_empty());
+    let note = harness.app.backend_notes.join(" ");
+    assert!(note.contains("--features touptek"), "note was {note:?}");
+}
+
+#[test]
+fn a_status_update_does_not_yank_a_slider_the_user_is_holding() {
+    let mut harness = Harness::new();
+    harness.connect();
+
+    // Make the camera slow to apply and report the change, which is when the
+    // stale value in the next status snapshot used to overwrite the slider.
+    harness.sim.set_control_latency(Duration::from_millis(300));
+    harness
+        .app
+        .set_control(firstlight_core::ControlId::Gain, 250, true);
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        harness.frame();
+        assert_eq!(
+            harness.app.values.get(&firstlight_core::ControlId::Gain),
+            Some(&250),
+            "the slider value was overwritten by a status update mid-edit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Once the camera has caught up, its value is adopted again.
+    harness.run_until("the camera to report the new gain", |app| {
+        app.status.settings.gain == 250
+    });
+}

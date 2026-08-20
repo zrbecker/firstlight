@@ -200,10 +200,12 @@ impl Default for WorkerStatus {
 /// Messages from the worker to whoever owns the handle.
 #[derive(Debug, Clone)]
 pub enum WorkerUpdate {
-    /// Result of enumeration, plus any per-backend failures as text.
+    /// Result of enumeration, plus any per-backend failures as text, plus
+    /// notes from backends that cannot see anything in this build.
     Cameras {
         cameras: Vec<CameraInfo>,
         errors: Vec<String>,
+        notes: Vec<String>,
     },
     /// Control table of the camera that just connected.
     Controls(Vec<ControlInfo>),
@@ -566,7 +568,12 @@ impl Worker {
             .into_iter()
             .map(|(backend, e)| format!("{backend}: {e}"))
             .collect();
-        let _ = self.updates.send(WorkerUpdate::Cameras { cameras, errors });
+        let notes = self.registry.notes();
+        let _ = self.updates.send(WorkerUpdate::Cameras {
+            cameras,
+            errors,
+            notes,
+        });
     }
 
     fn connect(&mut self, id: &CameraId) {

@@ -59,6 +59,14 @@ impl Registry {
         (cameras, errors)
     }
 
+    /// Explanations from backends that cannot see anything in this build.
+    pub fn notes(&self) -> Vec<String> {
+        self.backends
+            .iter()
+            .filter_map(|b| b.unavailable_reason())
+            .collect()
+    }
+
     /// Enumerate, discarding per-backend failures.
     pub fn enumerate_ok(&self) -> Vec<CameraInfo> {
         self.enumerate().0

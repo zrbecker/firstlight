@@ -104,6 +104,18 @@ pub trait Backend: Send + Sync {
         self.open(&first.id)
     }
 
+    /// Why this backend cannot see any camera in this build, when that is a
+    /// property of the build rather than of what is plugged in: a vendor SDK
+    /// that was not compiled in, a driver that is not installed.
+    ///
+    /// Returning `None` means "nothing to explain". This exists so a user
+    /// staring at an empty camera list can tell the difference between "no
+    /// camera is attached" and "this build cannot see your camera at all",
+    /// which otherwise look identical and waste an evening.
+    fn unavailable_reason(&self) -> Option<String> {
+        None
+    }
+
     /// Re-find a camera after a replug using [`CameraInfo::reconnect_key`].
     fn find_by_key(&self, key: &str) -> Result<Option<CameraInfo>> {
         Ok(self
