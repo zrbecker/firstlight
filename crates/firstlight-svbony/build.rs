@@ -271,7 +271,10 @@ mod sdk {
 
     fn build_libusb(dest: &Path) {
         let tarball = obtain(&LIBUSB);
-        let root = tarball.parent().expect("cache directory").join("libusb-1.0.27");
+        let root = tarball
+            .parent()
+            .expect("cache directory")
+            .join("libusb-1.0.27");
         if !root.is_dir() {
             let status = std::process::Command::new("tar")
                 .arg("xjf")
@@ -295,9 +298,11 @@ mod sdk {
             "libusb/os/threads_posix.c",
         ];
         let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-        let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default().as_str() {
-            "aarch64" => "arm64",
-            other => "x86_64".max(other),
+        let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        let arch = if target_arch == "aarch64" {
+            "arm64"
+        } else {
+            "x86_64"
         };
         let mut command = std::process::Command::new(&compiler);
         command
