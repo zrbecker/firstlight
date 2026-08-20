@@ -150,6 +150,10 @@ pub mod sys {
             .collect()
     }
 
+    /// How long to keep trying to open a camera that has just been closed.
+    const OPEN_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+    const OPEN_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+
     /// An open camera. Closed on drop, so an early return cannot leak the
     /// device and leave it unopenable until the process exits.
     pub struct Device {
@@ -174,11 +178,25 @@ pub mod sys {
             if self.open {
                 return Ok(());
             }
-            // SAFETY: `id` came from enumeration.
-            status::check("SVBOpenCamera", unsafe { ffi::SVBOpenCamera(self.id) }
-                as i32)?;
-            self.open = true;
-            Ok(())
+            // Measured on an SV305C Pro: for up to a second after the camera
+            // has been closed, SVBOpenCamera either blocks for most of that
+            // time or fails outright with "no camera with that id". The
+            // device is healthy and simply is not ready yet, so retry briefly
+            // rather than reporting a missing camera to somebody who is
+            // looking straight at it.
+            let deadline = std::time::Instant::now() + OPEN_RETRY_WINDOW;
+            loop {
+                // SAFETY: `id` came from enumeration.
+                let code = unsafe { ffi::SVBOpenCamera(self.id) } as i32;
+                if code == status::SVB_SUCCESS {
+                    self.open = true;
+                    return Ok(());
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(status::to_error("SVBOpenCamera", code));
+                }
+                std::thread::sleep(OPEN_RETRY_INTERVAL);
+            }
         }
 
         pub fn close(&mut self) {

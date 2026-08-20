@@ -24,7 +24,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
@@ -42,6 +42,16 @@ use crate::controls;
 /// How long one `SVBGetVideoData` call waits. Short slices keep the stop
 /// flag and queued control writes responsive during long exposures.
 const READ_SLICE_MS: i32 = 100;
+
+/// Pause after stopping video before anything else touches the camera.
+const RESTART_SETTLE: Duration = Duration::from_millis(150);
+
+/// How long a started stream may stay silent before the pump assumes the
+/// camera did not really start and tells it again.
+const SILENCE_BEFORE_KICK: Duration = Duration::from_millis(1500);
+
+/// How many times to try that before concluding the silence is real.
+const MAX_KICKS: u32 = 3;
 
 /// How often the pump asks the SDK how many frames the camera itself lost.
 const DROP_POLL_EVERY: u32 = 20;
@@ -361,6 +371,8 @@ impl SvbonyCamera {
 fn pump(shared: Arc<Shared>, capacity: usize) {
     let mut buffer = vec![0u8; capacity];
     let mut since_drop_check = 0u32;
+    let mut last_delivery = Instant::now();
+    let mut kicks = 0u32;
 
     loop {
         if shared.stop.load(Ordering::SeqCst) {
@@ -384,8 +396,44 @@ fn pump(shared: Arc<Shared>, capacity: usize) {
         };
 
         match read {
-            Ok(false) => continue, // nothing ready yet; normal on long exposures
+            Ok(false) => {
+                // Nothing ready is normal during a long exposure — but this
+                // SDK also accepts SVBStartVideoCapture and then delivers
+                // nothing at all, about half the time, after the stream has
+                // been stopped and started. Measured on an SV305C Pro. When
+                // that happens the camera is healthy and simply needs telling
+                // again, so kick it rather than leaving a frozen live view.
+                let quiet = last_delivery.elapsed();
+                let expected = Duration::from_micros(geometry.exposure_us.saturating_mul(3))
+                    .max(SILENCE_BEFORE_KICK);
+                if quiet > expected && kicks < MAX_KICKS {
+                    kicks += 1;
+                    {
+                        let device = shared.device();
+                        let _ = device.stop_video();
+                    }
+                    thread::sleep(RESTART_SETTLE);
+                    {
+                        let device = shared.device();
+                        if let Err(e) = device.start_video() {
+                            shared.ring.stop(StreamStop::Failed(e.to_string()));
+                            return;
+                        }
+                    }
+                    last_delivery = Instant::now();
+                    let _ = shared.events.send(CameraEvent::Warning {
+                        message: format!(
+                            "no frames for {:.1}s after starting the stream; \
+                             restarted the camera's video (attempt {kicks})",
+                            quiet.as_secs_f32()
+                        ),
+                    });
+                }
+                continue;
+            }
             Ok(true) => {
+                last_delivery = Instant::now();
+                kicks = 0;
                 let meta = FrameMeta {
                     sequence: shared.sequence.fetch_add(1, Ordering::Relaxed),
                     timestamp: SystemTime::now(),
@@ -677,19 +725,13 @@ impl Camera for SvbonyCamera {
                 "automatic white balance on a mono camera".into(),
             ));
         }
-        // The SDK measures from the current scene and writes the result into
-        // the camera's own gains.
-        self.shared.device().white_balance_once()?;
-
-        // Measured on an SV305C Pro: after this call the video stream stops
-        // delivering — the SDK evidently takes frames of its own to measure
-        // with, and never gives the pipeline back. Restarting the stream is
-        // the difference between a button that works and one that silently
-        // freezes the live view.
-        if self.streaming {
-            self.stop_streaming()?;
-            self.start_streaming()?;
-        }
+        // Measured on an SV305C Pro: called while video is running, this
+        // either returns success without changing the gains, or leaves the
+        // stream dead so every later frame times out — it takes frames of its
+        // own to measure with and does not give the pipeline back. Called
+        // with the stream stopped it works every time, so stop and restart
+        // around it exactly as the geometry changes do.
+        self.with_stream_stopped(|camera| camera.shared.device().white_balance_once())?;
         let _ = self.shared.events.send(CameraEvent::Warning {
             message: "white balance measured from the current scene and stored \
                       in the camera"
@@ -735,6 +777,11 @@ impl Camera for SvbonyCamera {
         // Stop the pump first so it is not mid-read when video stops.
         self.join_pump();
         let result = self.shared.device().stop_video();
+        // Measured: restarting immediately after stopping leaves the camera
+        // accepting the start and never delivering a frame, about half the
+        // time. Giving it a moment to settle is the difference between a
+        // geometry change that works and a live view that freezes.
+        thread::sleep(RESTART_SETTLE);
         self.shared.ring.stop(StreamStop::Stopped);
         let _ = self.shared.events.send(CameraEvent::StreamStopped);
         match result {

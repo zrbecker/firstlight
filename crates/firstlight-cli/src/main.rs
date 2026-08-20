@@ -412,7 +412,10 @@ fn apply(camera: &mut dyn Camera, settings: &Settings) -> Result<()> {
     // pixels while the read still reports something else, and that is worth
     // seeing rather than guessing at.
     if let Ok(wb) = camera.white_balance() {
-        println!("White balance reads back as R={} G={} B={}", wb.red, wb.green, wb.blue);
+        println!(
+            "White balance reads back as R={} G={} B={}",
+            wb.red, wb.green, wb.blue
+        );
     }
     println!(
         "Settings: exposure {}, gain {}, offset {}, ROI {}, bin {}, {}",
