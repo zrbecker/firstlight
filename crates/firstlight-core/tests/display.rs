@@ -209,6 +209,38 @@ fn cast_frame() -> Frame {
 }
 
 #[test]
+fn the_preview_white_balance_neutralises_a_cast_without_touching_the_frame() {
+    let frame = cast_frame();
+    let before = frame.data.to_vec();
+
+    let image = display::render(
+        &frame,
+        &DisplayOptions {
+            stretch: Stretch::auto(),
+            white_balance_preview: true,
+            ..DisplayOptions::default()
+        },
+    );
+    let [r, g, b] = channel_means(&image.rgba);
+    assert!(
+        (r - g).abs() < 6.0 && (g - b).abs() < 6.0,
+        "expected a neutral preview, got r={r:.1} g={g:.1} b={b:.1}"
+    );
+    // The correction is reported rather than hidden: red needed a higher
+    // white point than green, which is the cast measured.
+    assert!(
+        image.channel_levels[0].1 > image.channel_levels[1].1,
+        "channel levels should record the correction: {:?}",
+        image.channel_levels
+    );
+    assert_eq!(
+        frame.data.to_vec(),
+        before,
+        "the preview must never alter the frame that gets recorded"
+    );
+}
+
+#[test]
 fn a_colour_cast_is_shown_rather_than_corrected() {
     // Deliberate: all three channels share one pair of levels, taken from
     // luminance. Stretching each channel separately would white-balance the
@@ -220,12 +252,18 @@ fn a_colour_cast_is_shown_rather_than_corrected() {
         &frame,
         &DisplayOptions {
             stretch: Stretch::auto(),
+            white_balance_preview: false,
             ..DisplayOptions::default()
         },
     );
     let [r, g, b] = channel_means(&image.rgba);
     assert!(
         r > g + 10.0 && g > b + 10.0,
-        "the cast should reach the screen, got r={r:.1} g={g:.1} b={b:.1}"
+        "with the preview balance off the cast should reach the screen, got \
+         r={r:.1} g={g:.1} b={b:.1}"
+    );
+    assert_eq!(
+        image.channel_levels[0], image.channel_levels[2],
+        "off means one set of levels for every channel"
     );
 }

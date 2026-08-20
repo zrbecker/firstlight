@@ -287,6 +287,8 @@ fn snap(
         instrument: info.display_name.clone(),
         object: object.to_string(),
         pixel_size_um: Some(info.pixel_size_um),
+        // Recorded because the camera applies these to the raw data itself.
+        white_balance: camera.white_balance().ok(),
         ..FitsMetadata::default()
     };
 

@@ -236,3 +236,23 @@ fn the_live_view_is_actually_drawn() {
         ui.painted
     );
 }
+
+#[test]
+fn the_preview_white_balance_is_labelled_and_visible() {
+    let mut ui = Ui::new();
+    ui.connect();
+    ui.app.send(WorkerCommand::StartStream);
+    ui.run_until("a frame on screen", |ui| ui.app.texture.is_some());
+    ui.frame();
+
+    // Named for what it does, not "neutralise colour".
+    assert!(
+        ui.shows("White balance preview"),
+        "painted: {:#?}",
+        ui.painted
+    );
+    // What it is applying is on screen, so the correction is not silent.
+    assert!(ui.shows("preview gains"), "painted: {:#?}", ui.painted);
+    // And the live view says it is being corrected.
+    assert!(ui.shows("WB preview"), "painted: {:#?}", ui.painted);
+}

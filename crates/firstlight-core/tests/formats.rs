@@ -148,6 +148,11 @@ fn fits_header_carries_the_acquisition_keywords() {
     let mut meta = FitsMetadata::for_camera("SIM-1080C");
     meta.pixel_size_um = Some(2.9);
     meta.telescope = "Newtonian 200/1000".into();
+    meta.white_balance = Some(firstlight_core::WhiteBalance {
+        red: 150,
+        green: 128,
+        blue: 333,
+    });
     write_fits(&path, &frame, &meta).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -167,6 +172,11 @@ fn fits_header_carries_the_acquisition_keywords() {
         Some("'RGGB    '")
     );
     assert_eq!(card_value(&cards, "CCD-TEMP").as_deref(), Some("-10.5"));
+    // These cameras apply the white balance to the raw data itself, so the
+    // file has to record what was applied or it cannot be undone later.
+    assert_eq!(card_value(&cards, "WB_R").as_deref(), Some("150"));
+    assert_eq!(card_value(&cards, "WB_G").as_deref(), Some("128"));
+    assert_eq!(card_value(&cards, "WB_B").as_deref(), Some("333"));
     assert!(
         card_value(&cards, "DATE-OBS")
             .unwrap()

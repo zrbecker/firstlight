@@ -241,3 +241,43 @@ fn the_camera_can_be_closed_and_opened_again() {
         drop(camera);
     }
 }
+
+#[test]
+#[ignore = "needs a camera attached"]
+fn diagnose_continuous_auto_white_balance() {
+    // Does the camera adjust its own gains continuously when the control is
+    // put in auto mode? That is what a preview application would use to stay
+    // balanced as it is pointed around, and the SDK reports the WB controls
+    // as supporting auto.
+    let mut camera = open();
+    camera.set_exposure_us(20_000).unwrap();
+
+    // Start somewhere deliberately wrong.
+    camera.set_control(ControlId::WbRed, 128).unwrap();
+    camera.set_control(ControlId::WbBlue, 128).unwrap();
+    camera.start_streaming().unwrap();
+
+    for id in [ControlId::WbRed, ControlId::WbGreen, ControlId::WbBlue] {
+        match camera.set_control_auto(id, true) {
+            Ok(()) => println!("auto enabled for {id}"),
+            Err(e) => println!("auto refused for {id}: {e}"),
+        }
+    }
+
+    for step in 0..6 {
+        for _ in 0..5 {
+            let _ = camera.next_frame(TIMEOUT);
+        }
+        let wb = camera.white_balance().unwrap();
+        let auto = camera.control_auto(ControlId::WbRed).unwrap_or(false);
+        let means = channel_means(&settled_frame(camera.as_mut()));
+        println!(
+            "t={step}: gains R={} G={} B={} (auto={auto})  R/G={:.2} B/G={:.2}",
+            wb.red,
+            wb.green,
+            wb.blue,
+            means[0] / means[1],
+            means[2] / means[1]
+        );
+    }
+}

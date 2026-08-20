@@ -113,9 +113,16 @@ pub struct FirstLightApp {
     pub last_meta: Option<FrameMeta>,
     /// Levels the last auto-stretch settled on, shown in the UI.
     pub last_levels: (u16, u16),
+    /// Per-channel levels from the last render, so the preview balance can
+    /// show what it is applying.
+    pub last_channel_levels: [(u16, u16); 3],
     display_times: VecDeque<Instant>,
 
     pub auto_stretch: bool,
+    /// Neutralise the colour of the *preview* only. On by default: a live
+    /// view that swings green in one direction and red in another cannot be
+    /// used for framing or focusing.
+    pub white_balance_preview: bool,
     pub gamma: f32,
     pub debayer: bool,
     pub display: DisplayOptions,
@@ -155,8 +162,10 @@ impl FirstLightApp {
             texture: None,
             last_meta: None,
             last_levels: (0, 0),
+            last_channel_levels: [(0, 0); 3],
             display_times: VecDeque::new(),
             auto_stretch: true,
+            white_balance_preview: true,
             gamma: 1.0,
             debayer: true,
             display: DisplayOptions::default(),
@@ -379,6 +388,7 @@ impl FirstLightApp {
             } else {
                 Stretch::Linear
             },
+            white_balance_preview: self.white_balance_preview,
             debayer: self.debayer,
             subsample,
             gamma: self.gamma,
@@ -398,6 +408,7 @@ impl FirstLightApp {
         };
         let image = rendered.image;
         self.last_levels = (image.black, image.white);
+        self.last_channel_levels = image.channel_levels;
         self.last_meta = Some(rendered.meta);
 
         let colour = egui::ColorImage::from_rgba_unmultiplied(

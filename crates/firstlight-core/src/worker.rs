@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 
 use crate::camera::{Camera, CameraId, CameraInfo};
-use crate::control::{Binning, BitDepth, ControlId, ControlInfo, Roi};
+use crate::control::{Binning, BitDepth, ControlId, ControlInfo, Roi, WhiteBalance};
 use crate::error::{Error, Result};
 use crate::event::CameraEvent;
 use crate::format::fits::{FitsMetadata, write_fits};
@@ -624,6 +624,15 @@ impl Worker {
         }
     }
 
+    /// The white balance gains the camera currently reports, if it has them.
+    fn white_balance_snapshot(&self) -> Option<WhiteBalance> {
+        Some(WhiteBalance {
+            red: *self.control_values.get(&ControlId::WbRed)?,
+            green: *self.control_values.get(&ControlId::WbGreen)?,
+            blue: *self.control_values.get(&ControlId::WbBlue)?,
+        })
+    }
+
     fn enumerate(&mut self) {
         let (cameras, errors) = self.registry.enumerate();
         let errors = errors
@@ -885,6 +894,9 @@ impl Worker {
                 .map(|i| i.display_name.clone())
                 .unwrap_or_default(),
             pixel_size_um: info.as_ref().map(|i| i.pixel_size_um),
+            // These cameras bake the white balance into the raw data, so the
+            // file has to carry the gains or nobody can undo them later.
+            white_balance: self.white_balance_snapshot(),
             ..FitsMetadata::default()
         };
         match write_fits(&path, frame, &meta) {

@@ -35,6 +35,16 @@ impl Stretch {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DisplayOptions {
     pub stretch: Stretch,
+    /// Stretch each colour channel against its own histogram, so the picture
+    /// on screen looks neutral whatever the light.
+    ///
+    /// This is a *preview* white balance and nothing else: it never touches
+    /// what gets recorded or saved. It exists because a live view that swings
+    /// green in a hallway and red at a monitor is unusable for framing and
+    /// focusing, which is why other capture software does the same thing. The
+    /// levels it applies are reported in [`DisplayImage::channel_levels`] so
+    /// the correction is visible rather than silent.
+    pub white_balance_preview: bool,
     /// Debayer colour frames for display. Off shows the raw mosaic, which is
     /// useful for checking focus and for spotting a wrong Bayer phase.
     pub debayer: bool,
@@ -50,6 +60,7 @@ impl Default for DisplayOptions {
     fn default() -> Self {
         DisplayOptions {
             stretch: Stretch::Linear,
+            white_balance_preview: true,
             debayer: true,
             subsample: 1,
             gamma: 1.0,
@@ -69,6 +80,11 @@ pub struct DisplayImage {
     pub black: u16,
     /// White point actually applied, raw sample units.
     pub white: u16,
+    /// The levels applied to each channel. Identical to the pair above unless
+    /// the preview white balance is on, in which case they are what makes the
+    /// picture neutral — and worth showing, so the correction is never
+    /// invisible.
+    pub channel_levels: [(u16, u16); 3],
 }
 
 impl DisplayImage {
@@ -117,12 +133,16 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
     // that quietly corrects a colour cast stops you noticing that the
     // camera's own white balance wants setting.
     let mut histogram = vec![0u32; BINS];
+    let mut channels = [vec![0u32; BINS], vec![0u32; BINS], vec![0u32; BINS]];
     let bin_scale = (BINS - 1) as f32 / f32::from(full_scale.max(1));
+    let bin_of = |value: u32| ((value as f32 * bin_scale) as usize).min(BINS - 1);
 
-    let note = |histogram: &mut Vec<u32>, px: [u16; 3]| {
+    let note = |histogram: &mut Vec<u32>, channels: &mut [Vec<u32>; 3], px: [u16; 3]| {
         let lum = (u32::from(px[0]) + 2 * u32::from(px[1]) + u32::from(px[2])) / 4;
-        let bin = ((lum as f32 * bin_scale) as usize).min(BINS - 1);
-        histogram[bin] += 1;
+        histogram[bin_of(lum)] += 1;
+        for (channel, value) in channels.iter_mut().zip(px) {
+            channel[bin_of(u32::from(value))] += 1;
+        }
     };
 
     match (bayer, options.debayer) {
@@ -153,7 +173,7 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
                         (sums[1] / counts[1].max(1)) as u16,
                         (sums[2] / counts[2].max(1)) as u16,
                     ];
-                    note(&mut histogram, px);
+                    note(&mut histogram, &mut channels, px);
                     rgb.push(px);
                 }
             }
@@ -175,7 +195,7 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
                         let v = read_sample(data, offset, bps);
                         [v, v, v]
                     };
-                    note(&mut histogram, px);
+                    note(&mut histogram, &mut channels, px);
                     rgb.push(px);
                 }
             }
@@ -183,7 +203,19 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
     }
 
     let (black, white) = levels(&histogram, rgb.len(), options.stretch, full_scale);
-    let rgba = map_to_rgba(&rgb, black, white, options.gamma);
+    // Each channel stretched against its own histogram is what neutralises a
+    // cast: whatever the red response was, its own top percentile maps to
+    // white just as green's does.
+    let channel_levels = if options.white_balance_preview {
+        [
+            levels(&channels[0], rgb.len(), options.stretch, full_scale),
+            levels(&channels[1], rgb.len(), options.stretch, full_scale),
+            levels(&channels[2], rgb.len(), options.stretch, full_scale),
+        ]
+    } else {
+        [(black, white); 3]
+    };
+    let rgba = map_to_rgba(&rgb, channel_levels, options.gamma);
 
     DisplayImage {
         width: out_w,
@@ -191,6 +223,7 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
         rgba,
         black,
         white,
+        channel_levels,
     }
 }
 
@@ -260,13 +293,21 @@ fn levels(histogram: &[u32], pixels: usize, stretch: Stretch, full_scale: u16) -
     }
 }
 
-fn map_to_rgba(rgb: &[[u16; 3]], black: u16, white: u16, gamma: f32) -> Vec<u8> {
-    let span = f32::from(white.saturating_sub(black)).max(1.0);
-    let black = f32::from(black);
+fn map_to_rgba(rgb: &[[u16; 3]], levels: [(u16, u16); 3], gamma: f32) -> Vec<u8> {
+    let scale: Vec<(f32, f32)> = levels
+        .iter()
+        .map(|(black, white)| {
+            (
+                f32::from(*black),
+                f32::from(white.saturating_sub(*black)).max(1.0),
+            )
+        })
+        .collect();
     let apply_gamma = (gamma - 1.0).abs() > 1e-3 && gamma > 0.0;
     let mut out = Vec::with_capacity(rgb.len() * 4);
     for px in rgb {
-        for channel in px {
+        for (index, channel) in px.iter().enumerate() {
+            let (black, span) = scale[index];
             let mut t = ((f32::from(*channel) - black) / span).clamp(0.0, 1.0);
             if apply_gamma {
                 t = t.powf(gamma);

@@ -48,6 +48,13 @@ pub struct FitsMetadata {
     pub pixel_size_um: Option<f32>,
     pub focal_length_mm: Option<f32>,
     pub row_order: RowOrder,
+    /// White balance gains the camera was applying, in its own units.
+    ///
+    /// Worth recording because some cameras — SVBONY's and ZWO's among them —
+    /// apply these to the raw data before any software sees it, and store
+    /// nothing to say they did. Without the numbers the file cannot tell you
+    /// how it was scaled, and the balance cannot be undone in processing.
+    pub white_balance: Option<crate::control::WhiteBalance>,
     /// Extra `KEYWORD = value` cards, written verbatim as strings.
     pub extra: Vec<(String, String)>,
 }
@@ -62,6 +69,7 @@ impl Default for FitsMetadata {
             pixel_size_um: None,
             focal_length_mm: None,
             row_order: RowOrder::TopDown,
+            white_balance: None,
             extra: Vec::new(),
         }
     }
@@ -168,6 +176,12 @@ fn build_header(frame: &Frame, meta: &FitsMetadata) -> Vec<u8> {
         meta.row_order.as_str(),
         "row order of image data",
     );
+
+    if let Some(wb) = meta.white_balance {
+        cards.integer("WB_R", wb.red, "red white balance gain, camera units");
+        cards.integer("WB_G", wb.green, "green white balance gain, camera units");
+        cards.integer("WB_B", wb.blue, "blue white balance gain, camera units");
+    }
 
     if !meta.instrument.is_empty() {
         cards.string("INSTRUME", &meta.instrument, "camera");

@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   there is nothing to install by hand. Verified against a real SV305C Pro.
 - Backends can explain why they see nothing (`Backend::unavailable_reason`),
   which the GUI and CLI both surface.
+- A preview white balance, on by default: each colour channel is stretched
+  against its own histogram so the live view stays neutral wherever the camera
+  is pointed, which is what other capture software does and what makes a live
+  view usable for framing. It never touches recordings, the gains it applies
+  are shown beside the toggle, and the live view is marked while it is on.
+- FITS stills record the camera's white balance gains (`WB_R`, `WB_G`,
+  `WB_B`). These cameras apply the gains to the raw data before any software
+  sees it and store nothing to say so, which leaves a file that cannot be
+  un-balanced in processing. SharpCap solves the same problem by writing a
+  settings file beside each capture.
 - Automatic white balance measures the picture and corrects the camera's own
   gains, so captures come out balanced too. SVBONY's own "white balance once"
   call is not used: it writes the same fixed triple whatever the camera is
