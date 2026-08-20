@@ -5,6 +5,10 @@
 *.ser
 *.fits
 
+# The SVBONY SDK writes camera parameter files into the working directory.
+# Newer builds turn that off, but a file from an older run may still be here.
+*-AST_Cfg_*.bin
+
 # The vendor SDK is not redistributable; keep the instructions, not the files.
 /crates/firstlight-touptek/vendor/*
 !/crates/firstlight-touptek/vendor/README.md

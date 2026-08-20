@@ -343,6 +343,19 @@ pub mod sys {
             Ok(dropped.max(0) as u64)
         }
 
+        /// Turn the SDK's parameter auto-save on or off.
+        ///
+        /// With it on — which is the default — the SDK writes a
+        /// `<model>-AST_Cfg_*.bin` file into the process's *current working
+        /// directory* and reloads it the next time a camera is opened there.
+        /// That makes the camera's settings depend on where the application
+        /// was launched from, and litters that directory.
+        pub fn set_auto_save(&self, enable: bool) -> Result<()> {
+            status::check("SVBSetAutoSaveParam", unsafe {
+                ffi::SVBSetAutoSaveParam(self.id, i32::from(enable))
+            } as i32)
+        }
+
         /// Ask the camera to measure a white balance and store the result in
         /// its own gains.
         pub fn white_balance_once(&self) -> Result<()> {

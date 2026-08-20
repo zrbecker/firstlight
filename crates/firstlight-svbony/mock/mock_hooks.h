@@ -7,4 +7,5 @@ void SVB_mock_replug(void);
 void SVB_mock_freeze(int frozen);
 void SVB_mock_fail_next_control(void);
 void SVB_mock_set_dropped(int dropped);
+int  SVB_mock_auto_save(void);
 #endif

@@ -342,3 +342,23 @@ fn the_camera_can_measure_its_own_white_balance() {
     assert_eq!(camera.control(ControlId::WbRed).unwrap(), after.red);
     assert!(after.red > 128 && after.blue > 128);
 }
+
+#[test]
+fn the_sdk_is_told_not_to_write_parameter_files() {
+    // Left on, the SDK writes <model>-AST_Cfg_*.bin into the process's
+    // working directory and reloads it next time a camera is opened there.
+    // Observed on a real SV305C Pro: the same camera reported different gain,
+    // offset and white balance depending on which directory the program ran
+    // from, and dropped .bin files into a git working tree. The camera's own
+    // state should be the only state.
+    let (_guard, backend) = setup();
+    assert!(
+        mock::auto_save_enabled(),
+        "the SDK default is on, or this test proves nothing"
+    );
+    let _camera = open(&backend);
+    assert!(
+        !mock::auto_save_enabled(),
+        "connect should have turned it off"
+    );
+}

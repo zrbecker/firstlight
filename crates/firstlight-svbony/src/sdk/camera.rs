@@ -489,6 +489,14 @@ impl Camera for SvbonyCamera {
         // left armed for a trigger delivers nothing and explains nothing.
         let _ = self.shared.device().set_normal_mode();
 
+        // Stop the SDK writing a parameter file into whatever directory the
+        // application happens to have been launched from, and reloading it
+        // next time. That mechanism makes the camera's settings depend on the
+        // working directory — two launches from different places see
+        // different cameras — and leaves stray .bin files behind. What the
+        // camera holds should be the only state there is.
+        let _ = self.shared.device().set_auto_save(false);
+
         // Deepest mode the sensor offers, which is what an imager wants by
         // default; 8 bit is a deliberate choice for frame rate, not a default.
         let depth = self

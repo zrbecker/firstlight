@@ -5,6 +5,7 @@
 //! delivering, or to reject the next control write.
 
 unsafe extern "C" {
+    fn SVB_mock_auto_save() -> i32;
     fn SVB_mock_reset();
     fn SVB_mock_unplug();
     fn SVB_mock_replug();
@@ -42,4 +43,9 @@ pub fn fail_next_control() {
 /// Pretend the camera has dropped this many frames on the bus.
 pub fn set_dropped(dropped: i32) {
     unsafe { SVB_mock_set_dropped(dropped) }
+}
+
+/// Whether the SDK would be writing parameter files to the working directory.
+pub fn auto_save_enabled() -> bool {
+    unsafe { SVB_mock_auto_save() != 0 }
 }

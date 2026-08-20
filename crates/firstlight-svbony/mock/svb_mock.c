@@ -29,6 +29,7 @@ static struct {
     int frozen;
     int fail_next;
     int dropped;
+    SVB_BOOL auto_save;
     unsigned sequence;
     int roi[5]; /* x, y, w, h, bin */
     SVB_IMG_TYPE image_type;
@@ -59,6 +60,8 @@ static const struct {
 
 static void reset_state(void) {
     memset(&g, 0, sizeof g);
+    /* The real SDK saves parameters to the working directory by default. */
+    g.auto_save = SVB_TRUE;
     g.roi[0] = 0;
     g.roi[1] = 0;
     g.roi[2] = MOCK_WIDTH;
@@ -330,6 +333,15 @@ SVB_ERROR_CODE SVBWhiteBalanceOnce(int id) {
     return SVB_SUCCESS;
 }
 SVB_ERROR_CODE SVBRestoreDefaultParam(int id) { return require_open(id); }
+
+SVB_ERROR_CODE SVBSetAutoSaveParam(int id, SVB_BOOL enable) {
+    SVB_ERROR_CODE rc = require_open(id);
+    if (rc != SVB_SUCCESS) return rc;
+    g.auto_save = enable;
+    return SVB_SUCCESS;
+}
+
+int SVB_mock_auto_save(void) { ensure_init(); return g.auto_save; }
 
 /* --- test hooks, no counterpart in the vendor SDK -------------------- */
 
