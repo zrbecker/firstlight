@@ -39,6 +39,7 @@ pub fn default_registry() -> Registry {
     let mut registry = Registry::new();
     #[cfg(feature = "simulator")]
     registry.push(Arc::new(firstlight_core::simulator::SimulatorBackend::new()));
+    registry.push(Arc::new(firstlight_svbony::SvbonyBackend::new()));
     registry.push(Arc::new(firstlight_touptek::TouptekBackend::new()));
     registry
 }

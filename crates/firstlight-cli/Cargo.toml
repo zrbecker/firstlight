@@ -16,12 +16,15 @@ path = "src/main.rs"
 [features]
 default = ["simulator"]
 simulator = ["firstlight-core/simulator"]
-# Talk to real hardware. Needs the vendor SDK; see
-# crates/firstlight-touptek/vendor/README.md.
+# Talk to real hardware. The Touptek SDK must be installed by hand (see
+# crates/firstlight-touptek/vendor/README.md); the SVBONY SDK is downloaded
+# automatically by its build script.
 touptek = ["firstlight-touptek/sdk"]
+svbony = ["firstlight-svbony/sdk"]
 
 [dependencies]
 firstlight-core.workspace = true
+firstlight-svbony.workspace = true
 firstlight-touptek.workspace = true
 clap.workspace = true
 crossbeam-channel.workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "firstlight-svbony"
+description = "SVBONY SDK backend for FirstLight (SV305 series and other SVBONY cameras)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["astronomy", "camera", "svbony", "sv305", "bindings"]
+categories = ["hardware-support", "api-bindings", "science"]
+build = "build.rs"
+
+[features]
+default = []
+# Talk to real hardware. The vendor SDK is fetched automatically by build.rs;
+# see the module docs for how that works and how to opt out of it.
+sdk = ["dep:bindgen", "dep:sha2"]
+# Compile and exercise the FFI layer against a small C camera that implements
+# the real vendor header. Needs the header (34 kB, fetched) but no binaries.
+mock-sdk = ["dep:bindgen", "dep:cc", "dep:sha2"]
+
+[dependencies]
+firstlight-core.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+bindgen = { version = "0.72", optional = true }
+cc = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }

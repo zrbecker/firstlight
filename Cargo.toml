@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/firstlight-core",
+    "crates/firstlight-svbony",
     "crates/firstlight-touptek",
     "crates/firstlight-cli",
     "crates/firstlight-view",
@@ -16,6 +17,7 @@ repository = "https://github.com/zrbecker/firstlight"
 
 [workspace.dependencies]
 firstlight-core = { path = "crates/firstlight-core", version = "0.1.0" }
+firstlight-svbony = { path = "crates/firstlight-svbony", version = "0.1.0" }
 firstlight-touptek = { path = "crates/firstlight-touptek", version = "0.1.0" }
 
 crossbeam-channel = "0.5"

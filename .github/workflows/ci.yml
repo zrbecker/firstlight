@@ -35,9 +35,12 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
-      # The FFI layer, compiled and exercised against the mock camera. This is
-      # the only automated check the unsafe Touptek code gets; the vendor SDK
-      # is not redistributable, so a real `--features sdk` build cannot run
-      # here.
+      # The FFI layers, compiled and exercised against their mock cameras.
+      # This is the only automated check the unsafe code gets: neither vendor
+      # SDK carries a redistribution grant, so a real `--features sdk` build
+      # cannot run here. The SVBONY mock compiles against the vendor's own
+      # header, which its build script downloads.
       - run: cargo clippy -p firstlight-touptek --features mock-sdk --all-targets
       - run: cargo test -p firstlight-touptek --features mock-sdk
+      - run: cargo clippy -p firstlight-svbony --features mock-sdk --all-targets
+      - run: cargo test -p firstlight-svbony --features mock-sdk
