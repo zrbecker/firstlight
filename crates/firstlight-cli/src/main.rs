@@ -173,8 +173,10 @@ fn list(verbose: bool) -> Result<()> {
 
 fn info(select: &Select) -> Result<()> {
     let registry = registry(select);
-    let (info, camera) = open(&registry, select)?;
-    report::print_camera_detail(&info);
+    let (_, camera) = open(&registry, select)?;
+    // Print what the *open* camera reports: enumeration cannot see sensor
+    // geometry on every backend, so the pre-connect record has holes in it.
+    report::print_camera_detail(camera.info());
     report::print_controls(camera.as_ref())?;
     Ok(())
 }
