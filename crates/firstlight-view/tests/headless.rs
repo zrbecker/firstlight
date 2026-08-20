@@ -404,3 +404,104 @@ fn a_full_size_sensor_does_not_slow_the_window_down() {
         texture.size()
     );
 }
+
+#[test]
+fn sliders_show_what_the_camera_holds_rather_than_the_defaults() {
+    // The bug this guards: every control except exposure, gain and offset
+    // displayed its default, so a camera holding a white balance left by
+    // other software looked neutral in the UI while its frames were not.
+    let mut harness = Harness::new();
+    harness.connect();
+    harness.run_until("the control table", |app| !app.controls.is_empty());
+
+    let wb_red = firstlight_core::ControlId::WbRed;
+    let default = harness
+        .app
+        .controls
+        .iter()
+        .find(|c| c.id == wb_red)
+        .expect("white balance control")
+        .default;
+
+    // Change it *at the worker*, the way another application or a previous
+    // session would have: the UI never touches its own copy.
+    harness.app.send(WorkerCommand::SetControl {
+        id: wb_red,
+        value: 250,
+    });
+    harness.run_until("the slider to follow the camera", |app| {
+        app.values.get(&wb_red) == Some(&250)
+    });
+    assert_ne!(default, 250, "the test would prove nothing otherwise");
+}
+
+#[test]
+fn a_control_can_be_put_back_to_its_default() {
+    let mut harness = Harness::new();
+    harness.connect();
+    harness.run_until("the control table", |app| !app.controls.is_empty());
+
+    let wb_red = firstlight_core::ControlId::WbRed;
+    harness.app.send(WorkerCommand::SetControl {
+        id: wb_red,
+        value: 250,
+    });
+    harness.run_until("the change", |app| app.values.get(&wb_red) == Some(&250));
+
+    harness.app.reset_control(wb_red);
+    harness.run_until("the camera to report the default again", |app| {
+        app.status.control_values.get(&wb_red)
+            == app
+                .controls
+                .iter()
+                .find(|c| c.id == wb_red)
+                .map(|c| &c.default)
+    });
+}
+
+#[test]
+fn resetting_everything_leaves_read_only_controls_alone() {
+    let mut harness = Harness::new();
+    harness.connect();
+    harness.run_until("the control table", |app| !app.controls.is_empty());
+
+    let temperature = firstlight_core::ControlId::Vendor(16);
+    assert!(
+        harness
+            .app
+            .controls
+            .iter()
+            .any(|c| c.id == temperature && c.read_only),
+        "the simulator should expose a read-only control"
+    );
+
+    for (id, value) in [
+        (firstlight_core::ControlId::WbRed, 250),
+        (firstlight_core::ControlId::Gain, 300),
+    ] {
+        harness.app.send(WorkerCommand::SetControl { id, value });
+        harness.run_until("the change", |app| app.values.get(&id) == Some(&value));
+    }
+
+    let from = harness.app.log.len();
+    harness.app.reset_all_controls();
+    harness.run_until("everything back at its default", |app| {
+        app.controls
+            .iter()
+            .filter(|c| !c.read_only)
+            .all(|c| app.status.control_values.get(&c.id) == Some(&c.default))
+    });
+
+    // Writing a read-only control would have been reported as a failure.
+    let complaints: Vec<&str> = harness
+        .app
+        .log
+        .iter()
+        .skip(from)
+        .map(|l| l.text.as_str())
+        .collect();
+    assert!(
+        !complaints.iter().any(|t| t.contains("read-only")),
+        "reset-all tried to write a read-only control: {complaints:?}"
+    );
+}

@@ -39,9 +39,11 @@ pub struct DisplayOptions {
     /// any colour cast — the sensor's own response, the light in the room, or
     /// white-balance gains the camera has stored in it.
     ///
-    /// Display only, like everything else here: what gets recorded and saved
-    /// keeps the cast, because that is what the sensor actually measured.
-    /// Turn it off to see the data as it really is.
+    /// Off by default, deliberately. A live view that quietly corrects the
+    /// picture is telling you the camera is set up better than it is; the
+    /// honest fix for a colour cast is to see it and set the camera's white
+    /// balance. This is here for when you want a neutral preview anyway, and
+    /// it never affects what gets recorded or saved.
     pub neutralise_colour: bool,
     /// Debayer colour frames for display. Off shows the raw mosaic, which is
     /// useful for checking focus and for spotting a wrong Bayer phase.
@@ -58,7 +60,7 @@ impl Default for DisplayOptions {
     fn default() -> Self {
         DisplayOptions {
             stretch: Stretch::Linear,
-            neutralise_colour: true,
+            neutralise_colour: false,
             debayer: true,
             subsample: 1,
             gamma: 1.0,

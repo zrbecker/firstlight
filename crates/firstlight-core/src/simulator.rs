@@ -323,6 +323,7 @@ impl SimulatorCamera {
             (ControlId::WbGreen, 100),
             (ControlId::WbBlue, 100),
             (ControlId::UsbBandwidth, 100),
+            (ControlId::Vendor(16), 215),
         ]);
         SimulatorCamera {
             dev,
@@ -382,6 +383,11 @@ impl SimulatorCamera {
             ControlInfo::new(ControlId::Gain, "Gain", 100, 5_000, 100).unit("%"),
             ControlInfo::new(ControlId::Offset, "Offset", 0, 255, 10).unit("ADU"),
             ControlInfo::new(ControlId::UsbBandwidth, "USB bandwidth", 10, 100, 100).unit("%"),
+            // Real cameras report things you cannot set. Having one here
+            // keeps the tests honest about that.
+            ControlInfo::new(ControlId::Vendor(16), "Sensor temperature", -500, 1000, 215)
+                .unit("0.1C")
+                .read_only(true),
         ];
         if colour {
             table.push(ControlInfo::new(ControlId::WbRed, "WB red", 25, 400, 100).unit("%"));
@@ -616,6 +622,9 @@ impl Camera for SimulatorCamera {
     fn set_control(&mut self, id: ControlId, value: i64) -> Result<()> {
         self.check_alive()?;
         let info = self.control_info(id)?;
+        if info.read_only {
+            return Err(Error::Unsupported(format!("{id} is read-only")));
+        }
         let value = info.validate(value)?;
         self.values.insert(id, value);
         self.edit_settings(|s| match id {

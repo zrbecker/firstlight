@@ -158,7 +158,7 @@ impl FirstLightApp {
             last_levels: (0, 0),
             display_times: VecDeque::new(),
             auto_stretch: true,
-            neutralise_colour: true,
+            neutralise_colour: false,
             gamma: 1.0,
             debayer: true,
             display: DisplayOptions::default(),
@@ -207,6 +207,29 @@ impl FirstLightApp {
             self.send(WorkerCommand::SetControl { id, value });
         } else {
             self.pending.insert(id, (value, Instant::now()));
+        }
+    }
+
+    /// Put one control back to the value the camera reports as its default.
+    pub fn reset_control(&mut self, id: ControlId) {
+        let Some(control) = self.controls.iter().find(|c| c.id == id) else {
+            return;
+        };
+        if control.read_only {
+            return;
+        }
+        let default = control.default;
+        self.set_control(id, default, true);
+    }
+
+    /// Put every writable control back to its default. Geometry is left
+    /// alone: ROI, binning and bit depth are not part of this table and
+    /// changing them would restart the stream unasked.
+    pub fn reset_all_controls(&mut self) {
+        for control in self.controls.clone() {
+            if !control.read_only {
+                self.set_control(control.id, control.default, true);
+            }
         }
     }
 
@@ -277,6 +300,8 @@ impl FirstLightApp {
                     self.cameras = cameras;
                 }
                 WorkerUpdate::Controls(controls) => {
+                    // Seed only what has no value yet; the camera's own
+                    // readings arrive with the next status and take over.
                     for control in &controls {
                         self.values.entry(control.id).or_insert(control.default);
                     }
@@ -284,18 +309,13 @@ impl FirstLightApp {
                 }
                 WorkerUpdate::Status(status) => {
                     let status = *status;
-                    // Adopt the camera's values, but never for a control the
-                    // user is currently working: their pointer wins.
-                    if !self.is_editing(ControlId::ExposureUs) {
-                        self.values
-                            .insert(ControlId::ExposureUs, status.settings.exposure_us as i64);
-                    }
-                    if !self.is_editing(ControlId::Gain) {
-                        self.values.insert(ControlId::Gain, status.settings.gain);
-                    }
-                    if !self.is_editing(ControlId::Offset) {
-                        self.values
-                            .insert(ControlId::Offset, status.settings.offset);
+                    // Show what the camera actually holds, for every control
+                    // rather than a chosen few — but never for one the user
+                    // is currently working, where their pointer wins.
+                    for (id, value) in &status.control_values {
+                        if !self.is_editing(*id) {
+                            self.values.insert(*id, *value);
+                        }
                     }
                     if status.state.is_connected() && !self.status.state.is_connected() {
                         self.binning_choice = status.settings.binning;

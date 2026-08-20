@@ -524,3 +524,56 @@ fn auto_reconnect_can_be_turned_off_and_back_on() {
     session.send(WorkerCommand::SetAutoReconnect(true));
     session.wait_status("the reconnection", |s| s.state.is_connected());
 }
+
+#[test]
+fn the_status_carries_what_the_camera_says_every_control_is_set_to() {
+    // The bug this guards: only exposure, gain and offset were ever read
+    // back, so a UI showed defaults for everything else — including white
+    // balance, which a camera remembers between sessions and which another
+    // application may well have left somewhere surprising.
+    let mut session = Session::new();
+    session.connect();
+
+    let status = session.wait_status("control values", |s| !s.control_values.is_empty());
+    assert!(
+        status.control_values.contains_key(&ControlId::WbRed),
+        "white balance is missing from {:?}",
+        status.control_values.keys().collect::<Vec<_>>()
+    );
+
+    // Change one without going near the exposure/gain/offset special cases.
+    session.send(WorkerCommand::SetControl {
+        id: ControlId::WbRed,
+        value: 250,
+    });
+    let status = session.wait_status("the new white balance", |s| {
+        s.control_values.get(&ControlId::WbRed) == Some(&250)
+    });
+    // Everything else keeps its own value rather than being reset.
+    assert_eq!(status.control_values.get(&ControlId::WbBlue), Some(&100));
+}
+
+#[test]
+fn read_only_controls_are_reported_but_refused() {
+    let mut session = Session::new();
+    session.connect();
+    let temperature = ControlId::Vendor(16);
+
+    session.wait_status("the read-only control", |s| {
+        s.control_values.contains_key(&temperature)
+    });
+
+    let from = session.mark();
+    session.send(WorkerCommand::SetControl {
+        id: temperature,
+        value: 0,
+    });
+    let update = session.wait_update("the refusal", from, |u| {
+        matches!(u, WorkerUpdate::Failed { .. })
+    });
+    let WorkerUpdate::Failed { message, fatal, .. } = update else {
+        unreachable!()
+    };
+    assert!(message.contains("read-only"), "{message}");
+    assert!(!fatal);
+}

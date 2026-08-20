@@ -15,6 +15,7 @@
 //! Recording writes happen before the display hand-off and are never skipped,
 //! so a slow or hidden UI cannot punch holes in a capture.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -43,6 +44,10 @@ const STATUS_PERIOD: Duration = Duration::from_millis(200);
 const RECONNECT_PERIOD: Duration = Duration::from_millis(1000);
 /// Slack added to the expected frame period before reporting a stalled stream.
 const STALL_GRACE: Duration = Duration::from_secs(5);
+/// How often read-only controls (a sensor temperature, say) are re-read.
+/// Writable ones are only re-read when something might have changed them,
+/// because each read is a round trip that competes with frame delivery.
+const READONLY_REFRESH: Duration = Duration::from_secs(2);
 
 /// Optional stopping condition for a recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -177,6 +182,13 @@ pub struct WorkerStatus {
     pub temperature_c: Option<f32>,
     /// Set when the stream has gone quiet for longer than it should have.
     pub stalled: bool,
+    /// What the camera says each of its controls is currently set to.
+    ///
+    /// Read from the device rather than assumed, because a camera keeps its
+    /// own state: white balance gains, gamma and the rest survive a power
+    /// cycle and may have been left somewhere unexpected by other software.
+    /// A UI that shows defaults instead is lying about the hardware.
+    pub control_values: BTreeMap<ControlId, i64>,
 }
 
 impl Default for WorkerStatus {
@@ -193,6 +205,7 @@ impl Default for WorkerStatus {
             recording: None,
             temperature_c: None,
             stalled: false,
+            control_values: BTreeMap::new(),
         }
     }
 }
@@ -357,6 +370,11 @@ struct Worker {
     want_stream: bool,
 
     settings: CameraSettings,
+    /// The camera's control table, kept so its values can be re-read.
+    controls: Vec<ControlInfo>,
+    /// Last known value of every control, as reported by the camera.
+    control_values: BTreeMap<ControlId, i64>,
+    last_readonly_refresh: Option<Instant>,
     /// Settings the user asked for, re-applied after every reconnect.
     desired: Vec<(ControlId, i64)>,
 
@@ -396,6 +414,9 @@ impl Worker {
             next_reconnect: None,
             want_stream: false,
             settings: CameraSettings::default(),
+            controls: Vec::new(),
+            control_values: BTreeMap::new(),
+            last_readonly_refresh: None,
             desired: Vec::new(),
             recording: None,
             pending_snap: None,
@@ -421,6 +442,17 @@ impl Worker {
             self.try_reconnect();
 
             self.check_liveness();
+
+            // Keep live readings (sensor temperature and the like) current
+            // without polling the whole table over USB.
+            if self.camera.is_some()
+                && self
+                    .last_readonly_refresh
+                    .is_none_or(|t| t.elapsed() >= READONLY_REFRESH)
+            {
+                self.refresh_control_values(false);
+                self.last_readonly_refresh = Some(Instant::now());
+            }
 
             if self.camera.is_some() && self.streaming() {
                 self.pump_frame();
@@ -513,6 +545,8 @@ impl Worker {
                     // Remember it so a reconnect restores the same state.
                     self.desired.retain(|(existing, _)| *existing != id);
                     self.desired.push((id, value));
+                    // Read back rather than assuming: cameras clamp and round.
+                    self.refresh_control_values(true);
                     self.read_settings();
                     self.publish_status();
                 }
@@ -611,6 +645,7 @@ impl Worker {
                 self.session = true;
                 self.desired.clear();
                 self.publish_controls();
+                self.refresh_control_values(true);
                 self.read_settings();
                 self.publish_status();
             }
@@ -652,7 +687,35 @@ impl Worker {
             .as_ref()
             .and_then(|camera| camera.controls().ok())
             .unwrap_or_default();
+        self.controls = controls.clone();
         let _ = self.updates.send(WorkerUpdate::Controls(controls));
+    }
+
+    /// Re-read control values from the camera.
+    ///
+    /// With `writable_too` this reads the whole table, which is what to do
+    /// after connecting or after changing something. Without it only the
+    /// read-only controls are refreshed, which is the cheap periodic case:
+    /// nothing else can change behind our back.
+    fn refresh_control_values(&mut self, writable_too: bool) {
+        let Some(camera) = self.camera.as_ref() else {
+            return;
+        };
+        for control in &self.controls {
+            if !writable_too && !control.read_only {
+                continue;
+            }
+            // A control that will not answer is not worth failing over; it
+            // simply keeps whatever value was last known.
+            if let Ok(value) = camera.control(control.id) {
+                self.control_values.insert(control.id, value);
+            }
+        }
+        // A full pass covers the read-only ones too, so the periodic timer
+        // can start again from here.
+        if writable_too {
+            self.last_readonly_refresh = Some(Instant::now());
+        }
     }
 
     fn read_settings(&mut self) {
@@ -1011,6 +1074,7 @@ impl Worker {
         for (id, value) in desired {
             self.with_camera("restore control", |camera| camera.set_control(id, value));
         }
+        self.refresh_control_values(true);
         self.read_settings();
     }
 
@@ -1044,6 +1108,7 @@ impl Worker {
             }),
             temperature_c: temperature,
             stalled: self.stall_reported,
+            control_values: self.control_values.clone(),
         };
         let _ = self.updates.send(WorkerUpdate::Status(Box::new(status)));
     }

@@ -17,13 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- The live view rendered colour frames with a heavy cast, alarming enough to
-  look like a broken camera. Two causes: the SV305 keeps white-balance gains
-  in the camera and the SDK applies them to raw frames, and the display used
-  one set of levels for all three channels so any cast survived. The display
-  now stretches each channel against its own histogram ("Neutralise colour",
-  on by default, display only), and the backend warns when a camera has
-  non-default white balance stored in it.
+- Control sliders showed each control's default instead of what the camera
+  actually held: only exposure, gain and offset were ever read back. A camera
+  keeps white balance, gamma and the rest between sessions, so the UI could
+  claim neutral white balance while the frames carried a heavy colour cast —
+  which is exactly what happened on an SV305C Pro carrying gains left by
+  other software. Every control's value now comes from the camera. Each one
+  also gets a button to put it back to its default, plus a "Reset all".
+- A colour cast can be cancelled for the preview ("Neutralise colour"), but
+  it is off by default: a preview that quietly corrects the picture stops you
+  noticing that the camera needs setting up. The SVBONY backend warns on
+  connect when a camera carries non-default white balance.
 - Frame conversion ran on the UI thread, so a 1920x1080 camera made the
   window crawl. It now happens on a renderer thread, sized to the panel.
 - Sliders stuttered while dragging, because a status snapshot carrying the
