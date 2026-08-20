@@ -61,6 +61,9 @@ pub struct CameraInfo {
     /// Binning factors the camera supports (always contains 1).
     pub binnings: Vec<Binning>,
     pub has_cooler: bool,
+    /// The camera can measure a white balance for itself. See
+    /// [`Camera::auto_white_balance`].
+    pub has_auto_white_balance: bool,
 }
 
 impl CameraInfo {
@@ -187,6 +190,17 @@ pub trait Camera: Send {
 
     fn set_white_balance(&mut self, _wb: WhiteBalance) -> Result<()> {
         Err(Error::Unsupported("white balance".into()))
+    }
+
+    /// Ask the camera to measure a white balance from what it is looking at
+    /// and store the result in its own gains.
+    ///
+    /// This changes the camera, not the display: frames captured afterwards
+    /// are balanced, which is the difference between fixing a colour cast and
+    /// hiding one. Point the camera at something neutral first, or the
+    /// measurement will faithfully balance for whatever it can see.
+    fn auto_white_balance(&mut self) -> Result<()> {
+        Err(Error::Unsupported("automatic white balance".into()))
     }
 
     // --- streaming ------------------------------------------------------

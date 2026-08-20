@@ -397,6 +397,14 @@ fn apply(camera: &mut dyn Camera, settings: &Settings) -> Result<()> {
     for (id, value) in &settings.controls {
         camera.set_control(*id, *value)?;
     }
+    if settings.auto_wb {
+        camera.auto_white_balance()?;
+        let wb = camera.white_balance()?;
+        println!(
+            "White balance measured by the camera: R={} G={} B={} (stored in the camera)",
+            wb.red, wb.green, wb.blue
+        );
+    }
     // Report what the camera actually settled on, which is not always what
     // was asked for: ranges get clamped and ROIs get rounded.
     let exposure = camera.exposure_us().unwrap_or(0);

@@ -35,16 +35,6 @@ impl Stretch {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DisplayOptions {
     pub stretch: Stretch,
-    /// Stretch each colour channel against its own histogram, which cancels
-    /// any colour cast — the sensor's own response, the light in the room, or
-    /// white-balance gains the camera has stored in it.
-    ///
-    /// Off by default, deliberately. A live view that quietly corrects the
-    /// picture is telling you the camera is set up better than it is; the
-    /// honest fix for a colour cast is to see it and set the camera's white
-    /// balance. This is here for when you want a neutral preview anyway, and
-    /// it never affects what gets recorded or saved.
-    pub neutralise_colour: bool,
     /// Debayer colour frames for display. Off shows the raw mosaic, which is
     /// useful for checking focus and for spotting a wrong Bayer phase.
     pub debayer: bool,
@@ -60,7 +50,6 @@ impl Default for DisplayOptions {
     fn default() -> Self {
         DisplayOptions {
             stretch: Stretch::Linear,
-            neutralise_colour: false,
             debayer: true,
             subsample: 1,
             gamma: 1.0,
@@ -76,15 +65,10 @@ pub struct DisplayImage {
     pub height: u32,
     /// Row-major RGBA, 4 bytes per pixel, alpha always 255.
     pub rgba: Vec<u8>,
-    /// Black point actually applied, raw sample units. With
-    /// [`DisplayOptions::neutralise_colour`] on this is the green channel's,
-    /// which is the one worth quoting.
+    /// Black point actually applied, raw sample units.
     pub black: u16,
     /// White point actually applied, raw sample units.
     pub white: u16,
-    /// Per-channel levels, which differ from the pair above only when the
-    /// colour cast is being cancelled.
-    pub channel_levels: [(u16, u16); 3],
 }
 
 impl DisplayImage {
@@ -125,20 +109,20 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
     let full_scale = frame.meta.bit_depth.max_value() as u16;
 
     let mut rgb: Vec<[u16; 3]> = Vec::with_capacity(out_w as usize * out_h as usize);
-    // Histograms accumulated as the pixels are read, so they are only walked
-    // once: one of luminance for a shared stretch, and one per channel for
-    // cancelling a colour cast.
+    // Histogram of luminance, accumulated as the pixels are read so they are
+    // only walked once.
+    //
+    // Luminance rather than per-channel, deliberately: stretching each
+    // channel separately would white-balance the picture, and a live view
+    // that quietly corrects a colour cast stops you noticing that the
+    // camera's own white balance wants setting.
     let mut histogram = vec![0u32; BINS];
-    let mut channels = [vec![0u32; BINS], vec![0u32; BINS], vec![0u32; BINS]];
     let bin_scale = (BINS - 1) as f32 / f32::from(full_scale.max(1));
-    let bin_of = |value: u32| ((value as f32 * bin_scale) as usize).min(BINS - 1);
 
-    let note = |histogram: &mut Vec<u32>, channels: &mut [Vec<u32>; 3], px: [u16; 3]| {
+    let note = |histogram: &mut Vec<u32>, px: [u16; 3]| {
         let lum = (u32::from(px[0]) + 2 * u32::from(px[1]) + u32::from(px[2])) / 4;
-        histogram[bin_of(lum)] += 1;
-        for (channel, value) in channels.iter_mut().zip(px) {
-            channel[bin_of(u32::from(value))] += 1;
-        }
+        let bin = ((lum as f32 * bin_scale) as usize).min(BINS - 1);
+        histogram[bin] += 1;
     };
 
     match (bayer, options.debayer) {
@@ -169,7 +153,7 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
                         (sums[1] / counts[1].max(1)) as u16,
                         (sums[2] / counts[2].max(1)) as u16,
                     ];
-                    note(&mut histogram, &mut channels, px);
+                    note(&mut histogram, px);
                     rgb.push(px);
                 }
             }
@@ -191,7 +175,7 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
                         let v = read_sample(data, offset, bps);
                         [v, v, v]
                     };
-                    note(&mut histogram, &mut channels, px);
+                    note(&mut histogram, px);
                     rgb.push(px);
                 }
             }
@@ -199,19 +183,7 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
     }
 
     let (black, white) = levels(&histogram, rgb.len(), options.stretch, full_scale);
-    // Stretching each channel against its own histogram is what cancels a
-    // cast: whatever the sensor's red response was, its own top percentile
-    // maps to white just as green's does.
-    let channel_levels = if options.neutralise_colour {
-        [
-            levels(&channels[0], rgb.len(), options.stretch, full_scale),
-            levels(&channels[1], rgb.len(), options.stretch, full_scale),
-            levels(&channels[2], rgb.len(), options.stretch, full_scale),
-        ]
-    } else {
-        [(black, white); 3]
-    };
-    let rgba = map_to_rgba(&rgb, channel_levels, options.gamma);
+    let rgba = map_to_rgba(&rgb, black, white, options.gamma);
 
     DisplayImage {
         width: out_w,
@@ -219,7 +191,6 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
         rgba,
         black,
         white,
-        channel_levels,
     }
 }
 
@@ -289,21 +260,13 @@ fn levels(histogram: &[u32], pixels: usize, stretch: Stretch, full_scale: u16) -
     }
 }
 
-fn map_to_rgba(rgb: &[[u16; 3]], levels: [(u16, u16); 3], gamma: f32) -> Vec<u8> {
-    let scale: Vec<(f32, f32)> = levels
-        .iter()
-        .map(|(black, white)| {
-            (
-                f32::from(*black),
-                f32::from(white.saturating_sub(*black)).max(1.0),
-            )
-        })
-        .collect();
+fn map_to_rgba(rgb: &[[u16; 3]], black: u16, white: u16, gamma: f32) -> Vec<u8> {
+    let span = f32::from(white.saturating_sub(black)).max(1.0);
+    let black = f32::from(black);
     let apply_gamma = (gamma - 1.0).abs() > 1e-3 && gamma > 0.0;
     let mut out = Vec::with_capacity(rgb.len() * 4);
     for px in rgb {
-        for (index, channel) in px.iter().enumerate() {
-            let (black, span) = scale[index];
+        for channel in px {
             let mut t = ((f32::from(*channel) - black) / span).clamp(0.0, 1.0);
             if apply_gamma {
                 t = t.powf(gamma);

@@ -222,6 +222,8 @@ fn sim_info(
         bit_depths: vec![BitDepth::EIGHT, BitDepth::TWELVE, BitDepth::SIXTEEN],
         binnings: vec![Binning(1), Binning(2), Binning(4)],
         has_cooler: false,
+        // The simulator has no sensor to measure a balance from.
+        has_auto_white_balance: false,
     }
 }
 

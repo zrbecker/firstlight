@@ -102,6 +102,8 @@ pub enum WorkerCommand {
     Snap {
         path: PathBuf,
     },
+    /// Ask the camera to measure and store its own white balance.
+    AutoWhiteBalance,
     /// Keep trying to re-open the camera after a device loss.
     SetAutoReconnect(bool),
     Shutdown,
@@ -587,6 +589,19 @@ impl Worker {
                     self.with_camera("start stream for snapshot", |camera| {
                         camera.start_streaming()
                     });
+                }
+            }
+            WorkerCommand::AutoWhiteBalance => {
+                if self
+                    .with_camera("automatic white balance", |camera| {
+                        camera.auto_white_balance()
+                    })
+                    .is_some()
+                {
+                    // The camera has just rewritten its own gains; read them
+                    // back so the sliders show what it decided.
+                    self.refresh_control_values(true);
+                    self.publish_status();
                 }
             }
             WorkerCommand::SetAutoReconnect(on) => {

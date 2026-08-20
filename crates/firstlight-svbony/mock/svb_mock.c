@@ -316,7 +316,19 @@ SVB_ERROR_CODE SVBGetDroppedFrames(int id, int *dropped) {
     return SVB_SUCCESS;
 }
 
-SVB_ERROR_CODE SVBWhiteBalanceOnce(int id) { return require_open(id); }
+SVB_ERROR_CODE SVBWhiteBalanceOnce(int id) {
+    SVB_ERROR_CODE rc = require_open(id);
+    if (rc != SVB_SUCCESS) return rc;
+    /*
+     * A real camera measures the scene and writes the result into its own
+     * gains. These are the values a real SV305C Pro came back with, which
+     * makes the test assert on something a camera actually produced.
+     */
+    g.controls[SVB_WB_R] = 213;
+    g.controls[SVB_WB_G] = 128;
+    g.controls[SVB_WB_B] = 240;
+    return SVB_SUCCESS;
+}
 SVB_ERROR_CODE SVBRestoreDefaultParam(int id) { return require_open(id); }
 
 /* --- test hooks, no counterpart in the vendor SDK -------------------- */

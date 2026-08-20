@@ -143,9 +143,14 @@ pub struct Settings {
     #[arg(long, value_parser = parse_bit_depth)]
     pub bits: Option<BitDepth>,
 
-    /// White balance as R,G,B percentages.
+    /// White balance as R,G,B, in the camera's own units.
     #[arg(long, value_parser = parse_triple)]
     pub wb: Option<[i64; 3]>,
+
+    /// Have the camera measure a white balance from the current scene and
+    /// store it. Point it at something neutral first.
+    #[arg(long)]
+    pub auto_wb: bool,
 
     /// Set any control by name, e.g. --set usb_bandwidth=80. Repeatable, and
     /// `vendor:<n>=<v>` reaches backend-specific options.

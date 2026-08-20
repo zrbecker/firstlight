@@ -209,86 +209,23 @@ fn cast_frame() -> Frame {
 }
 
 #[test]
-fn a_colour_cast_is_cancelled_for_display_when_asked() {
+fn a_colour_cast_is_shown_rather_than_corrected() {
+    // Deliberate: all three channels share one pair of levels, taken from
+    // luminance. Stretching each channel separately would white-balance the
+    // preview, and a live view that hides a cast stops you noticing that the
+    // camera's own white balance wants setting — which is a thing the camera
+    // remembers between sessions and other software may have left wrong.
     let frame = cast_frame();
-
-    // Off: the display shows the cast, because that is what the sensor saw.
-    let honest = display::render(
+    let image = display::render(
         &frame,
         &DisplayOptions {
             stretch: Stretch::auto(),
-            neutralise_colour: false,
             ..DisplayOptions::default()
         },
     );
-    let [r, g, b] = channel_means(&honest.rgba);
+    let [r, g, b] = channel_means(&image.rgba);
     assert!(
         r > g + 10.0 && g > b + 10.0,
-        "expected the cast to survive, got r={r:.1} g={g:.1} b={b:.1}"
+        "the cast should reach the screen, got r={r:.1} g={g:.1} b={b:.1}"
     );
-    assert_eq!(
-        honest.channel_levels[0], honest.channel_levels[2],
-        "with cancelling off, every channel shares one pair of levels"
-    );
-
-    // On: each channel is stretched against its own histogram, so the same
-    // frame comes out neutral.
-    let neutral = display::render(
-        &frame,
-        &DisplayOptions {
-            stretch: Stretch::auto(),
-            neutralise_colour: true,
-            ..DisplayOptions::default()
-        },
-    );
-    let [r, g, b] = channel_means(&neutral.rgba);
-    assert!(
-        (r - g).abs() < 6.0 && (g - b).abs() < 6.0,
-        "expected a neutral rendering, got r={r:.1} g={g:.1} b={b:.1}"
-    );
-    // The red channel's own white point is about twice green's, which is the
-    // cast being measured rather than guessed at.
-    let (red_white, green_white) = (neutral.channel_levels[0].1, neutral.channel_levels[1].1);
-    assert!(
-        red_white > green_white,
-        "red {red_white} should stretch against a higher white point than green {green_white}"
-    );
-}
-
-#[test]
-fn cancelling_a_cast_does_not_touch_the_frame_or_a_mono_image() {
-    let frame = cast_frame();
-    let before = frame.data.to_vec();
-    let _ = display::render(
-        &frame,
-        &DisplayOptions {
-            stretch: Stretch::auto(),
-            neutralise_colour: true,
-            ..DisplayOptions::default()
-        },
-    );
-    assert_eq!(
-        frame.data.to_vec(),
-        before,
-        "the recorded data is untouched"
-    );
-
-    // A mono frame has nothing to neutralise; it must come out the same
-    // either way rather than being scaled per "channel".
-    let mono = bayer_frame(BayerPattern::Rggb, 200, 200, 200);
-    let with = display::render(
-        &mono,
-        &DisplayOptions {
-            neutralise_colour: true,
-            ..DisplayOptions::default()
-        },
-    );
-    let without = display::render(
-        &mono,
-        &DisplayOptions {
-            neutralise_colour: false,
-            ..DisplayOptions::default()
-        },
-    );
-    assert_eq!(with.rgba, without.rgba);
 }

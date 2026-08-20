@@ -167,6 +167,8 @@ impl SvbonyCamera {
         } else {
             PixelFormat::Mono
         };
+        // Only a colour sensor has anything to balance.
+        self.info.has_auto_white_balance = self.colour;
         self.info.binnings = property
             .SupportedBins
             .iter()
@@ -658,6 +660,24 @@ impl Camera for SvbonyCamera {
             green: self.control(ControlId::WbGreen)?,
             blue: self.control(ControlId::WbBlue)?,
         })
+    }
+
+    fn auto_white_balance(&mut self) -> Result<()> {
+        self.check_alive()?;
+        if !self.colour {
+            return Err(Error::Unsupported(
+                "automatic white balance on a mono camera".into(),
+            ));
+        }
+        // The SDK measures from the current scene and writes the result into
+        // the camera's own gains, where it persists.
+        self.shared.device().white_balance_once()?;
+        let _ = self.shared.events.send(CameraEvent::Warning {
+            message: "white balance measured from the current scene and stored \
+                      in the camera"
+                .into(),
+        });
+        Ok(())
     }
 
     fn set_white_balance(&mut self, wb: WhiteBalance) -> Result<()> {

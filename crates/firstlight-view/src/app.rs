@@ -116,7 +116,6 @@ pub struct FirstLightApp {
     display_times: VecDeque<Instant>,
 
     pub auto_stretch: bool,
-    pub neutralise_colour: bool,
     pub gamma: f32,
     pub debayer: bool,
     pub display: DisplayOptions,
@@ -158,7 +157,6 @@ impl FirstLightApp {
             last_levels: (0, 0),
             display_times: VecDeque::new(),
             auto_stretch: true,
-            neutralise_colour: false,
             gamma: 1.0,
             debayer: true,
             display: DisplayOptions::default(),
@@ -381,7 +379,6 @@ impl FirstLightApp {
             } else {
                 Stretch::Linear
             },
-            neutralise_colour: self.neutralise_colour,
             debayer: self.debayer,
             subsample,
             gamma: self.gamma,

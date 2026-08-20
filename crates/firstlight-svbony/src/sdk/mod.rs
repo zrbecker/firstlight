@@ -144,6 +144,8 @@ pub mod sys {
                 bit_depths: Vec::new(),
                 binnings: vec![Binning::ONE],
                 has_cooler: false,
+                // Filled in once the camera is open and its sensor is known.
+                has_auto_white_balance: false,
             })
             .collect()
     }
@@ -339,6 +341,15 @@ pub mod sys {
                 ffi::SVBGetDroppedFrames(self.id, &mut dropped)
             } as i32)?;
             Ok(dropped.max(0) as u64)
+        }
+
+        /// Ask the camera to measure a white balance and store the result in
+        /// its own gains.
+        pub fn white_balance_once(&self) -> Result<()> {
+            status::check(
+                "SVBWhiteBalanceOnce",
+                unsafe { ffi::SVBWhiteBalanceOnce(self.id) } as i32,
+            )
         }
 
         pub fn serial_number(&self) -> Result<String> {
