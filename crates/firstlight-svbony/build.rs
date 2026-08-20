@@ -97,7 +97,8 @@ mod sdk {
 
         if link_library {
             let lib = obtain(&library());
-            link(&lib);
+            let staged = link(&lib);
+            provide_libusb(&staged);
         } else {
             #[cfg(feature = "mock-sdk")]
             build_mock(&header);
@@ -229,7 +230,114 @@ mod sdk {
             .expect("writing svbony_bindings.rs");
     }
 
-    fn link(lib: &Path) {
+    /// libusb, which the SVBONY library links against.
+    ///
+    /// On Linux it is a distribution package and already present. macOS has
+    /// no system copy, so rather than making the user install one, take the
+    /// first of: a Homebrew or /usr/local copy, or a build from the pinned
+    /// upstream source. Either way the result lands next to the SDK, which is
+    /// already on the binary's rpath.
+    fn provide_libusb(lib_dir: &Path) {
+        if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "macos" {
+            return;
+        }
+        let wanted = lib_dir.join("libusb-1.0.0.dylib");
+        if wanted.is_file() {
+            return;
+        }
+        for existing in [
+            "/opt/homebrew/lib/libusb-1.0.0.dylib",
+            "/usr/local/lib/libusb-1.0.0.dylib",
+        ] {
+            let existing = Path::new(existing);
+            if existing.is_file() {
+                std::fs::copy(existing, &wanted).expect("copying the system libusb");
+                return;
+            }
+        }
+        build_libusb(&wanted);
+    }
+
+    /// libusb 1.0.27, built from the upstream release.
+    ///
+    /// It ships an `Xcode/config.h` precisely so it can be compiled on macOS
+    /// without autotools, which makes this a short compile of nine files
+    /// rather than a whole build system.
+    const LIBUSB: Pinned = Pinned {
+        url: "https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2",
+        sha256: "ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575",
+        name: "libusb-1.0.27.tar.bz2",
+    };
+
+    fn build_libusb(dest: &Path) {
+        let tarball = obtain(&LIBUSB);
+        let root = tarball.parent().expect("cache directory").join("libusb-1.0.27");
+        if !root.is_dir() {
+            let status = std::process::Command::new("tar")
+                .arg("xjf")
+                .arg(&tarball)
+                .arg("-C")
+                .arg(tarball.parent().expect("cache directory"))
+                .status()
+                .expect("running tar");
+            assert!(status.success(), "unpacking {}", tarball.display());
+        }
+
+        let sources = [
+            "libusb/core.c",
+            "libusb/descriptor.c",
+            "libusb/hotplug.c",
+            "libusb/io.c",
+            "libusb/strerror.c",
+            "libusb/sync.c",
+            "libusb/os/darwin_usb.c",
+            "libusb/os/events_posix.c",
+            "libusb/os/threads_posix.c",
+        ];
+        let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+        let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default().as_str() {
+            "aarch64" => "arm64",
+            other => "x86_64".max(other),
+        };
+        let mut command = std::process::Command::new(&compiler);
+        command
+            .arg("-dynamiclib")
+            .args(["-arch", arch])
+            .args(["-o"])
+            .arg(dest)
+            // The SDK asks for this exact name, so the built library has to
+            // announce itself by it.
+            .args(["-install_name", "@rpath/libusb-1.0.0.dylib"])
+            .arg(format!("-I{}", root.join("libusb").display()))
+            .arg(format!("-I{}", root.join("Xcode").display()))
+            .arg("-O2")
+            .arg("-fPIC")
+            .arg("-fvisibility=hidden");
+        for source in sources {
+            command.arg(root.join(source));
+        }
+        command
+            .args(["-framework", "IOKit"])
+            .args(["-framework", "CoreFoundation"])
+            .args(["-framework", "Security"])
+            .arg("-lobjc");
+
+        println!("cargo:warning=building libusb from source (once per machine)");
+        let status = command.status().expect("running the C compiler for libusb");
+        assert!(
+            status.success(),
+            "could not build libusb. Install it instead (brew install libusb) \
+             and rebuild."
+        );
+
+        // LGPL: the licence travels with the binary.
+        let _ = std::fs::copy(
+            root.join("COPYING"),
+            dest.with_file_name("libusb-COPYING.txt"),
+        );
+    }
+
+    fn link(lib: &Path) -> PathBuf {
         // The cached file has the right contents but the linker wants a
         // conventionally named library in a directory of its own.
         let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
@@ -248,6 +356,7 @@ mod sdk {
         // the rpath in their own build scripts.
         println!("cargo:lib_dir={}", dir.display());
         println!("cargo:library={}", staged.display());
+        dir
     }
 
     /// The mock camera compiles against the *real* header, so the FFI layer
