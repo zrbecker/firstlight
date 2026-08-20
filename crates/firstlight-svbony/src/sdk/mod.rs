@@ -150,6 +150,36 @@ pub mod sys {
             .collect()
     }
 
+    /// When a camera was last closed in this process.
+    ///
+    /// Measured on an SV305C Pro: a camera opened within about a second of
+    /// being closed comes back as a handle that accepts every call and then
+    /// never delivers a frame. The SDK gives no way to ask whether the device
+    /// is ready, so the only defence is to wait — and only when reopening
+    /// quickly, which is why the time is recorded rather than the delay being
+    /// paid on every open.
+    static LAST_CLOSE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+    /// How long a camera wants to itself after being closed.
+    pub const REOPEN_QUIET: std::time::Duration = std::time::Duration::from_millis(1200);
+
+    fn note_close() {
+        *LAST_CLOSE.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+    }
+
+    /// Sleep out whatever is left of the quiet period after the last close.
+    pub fn wait_until_reopenable() {
+        let since = LAST_CLOSE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(|at| at.elapsed());
+        if let Some(since) = since
+            && since < REOPEN_QUIET
+        {
+            std::thread::sleep(REOPEN_QUIET - since);
+        }
+    }
+
     /// An open camera. Closed on drop, so an early return cannot leak the
     /// device and leave it unopenable until the process exits.
     pub struct Device {
@@ -199,6 +229,7 @@ pub mod sys {
                 // SAFETY: the camera was opened by us and is closed once.
                 unsafe { ffi::SVBCloseCamera(self.id) };
                 self.open = false;
+                note_close();
             }
         }
 

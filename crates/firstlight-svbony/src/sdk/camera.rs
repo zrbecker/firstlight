@@ -833,6 +833,9 @@ impl SvbonyCamera {
     /// or reconnecting after an unplug, fails on a camera that is sitting
     /// there working.
     fn open_with_retry(&mut self) -> Result<()> {
+        // A camera reopened too soon after closing accepts everything and
+        // delivers nothing, so wait out the rest of its quiet period first.
+        sys::wait_until_reopenable();
         let deadline = Instant::now() + OPEN_RETRY_WINDOW;
         loop {
             let result = self.shared.device().open();
