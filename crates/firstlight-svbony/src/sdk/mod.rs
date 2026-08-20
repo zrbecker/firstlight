@@ -144,8 +144,6 @@ pub mod sys {
                 bit_depths: Vec::new(),
                 binnings: vec![Binning::ONE],
                 has_cooler: false,
-                // Filled in once the camera is open and its sensor is known.
-                has_auto_white_balance: false,
             })
             .collect()
     }

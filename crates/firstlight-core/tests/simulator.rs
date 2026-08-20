@@ -308,3 +308,48 @@ fn snap_leaves_the_stream_as_it_found_it() {
         "snap should have stopped the stream"
     );
 }
+
+#[test]
+fn automatic_white_balance_measures_and_corrects() {
+    use firstlight_core::WhiteBalance;
+
+    let backend = small_colour_backend();
+    let mut camera = backend.open_first().unwrap();
+    camera.set_exposure_us(20_000).unwrap();
+
+    // Start well off balance.
+    camera
+        .set_white_balance(WhiteBalance {
+            red: 300,
+            green: 100,
+            blue: 40,
+        })
+        .unwrap();
+    camera.start_streaming().unwrap();
+    let before = camera.next_frame(TIMEOUT).unwrap().channel_means().unwrap();
+    assert!(
+        before[0] / before[1] > 1.5,
+        "the frame should start red-heavy, got {before:?}"
+    );
+
+    camera.auto_white_balance().unwrap();
+
+    let after = camera.next_frame(TIMEOUT).unwrap().channel_means().unwrap();
+    let (red, blue) = (after[0] / after[1], after[2] / after[1]);
+    assert!(
+        (0.7..1.4).contains(&red) && (0.7..1.4).contains(&blue),
+        "expected a balanced frame, got R/G={red:.2} B/G={blue:.2} from {after:?}"
+    );
+
+    // It changed the camera, not the view: the gains moved.
+    let gains = camera.white_balance().unwrap();
+    assert_ne!(gains.red, 300, "the red gain should have been corrected");
+}
+
+#[test]
+fn automatic_white_balance_is_refused_on_a_mono_camera() {
+    let backend = SimulatorBackend::single(64, 48, PixelFormat::Mono);
+    let mut camera = backend.open_first().unwrap();
+    let error = camera.auto_white_balance().unwrap_err();
+    assert!(matches!(error, Error::Unsupported(_)), "got {error:?}");
+}

@@ -323,27 +323,6 @@ fn dropping_a_streaming_camera_shuts_the_sdk_down_cleanly() {
 }
 
 #[test]
-fn the_camera_can_measure_its_own_white_balance() {
-    let (_guard, backend) = setup();
-    let mut camera = open(&backend);
-    assert!(
-        camera.info().has_auto_white_balance,
-        "a colour camera should offer it"
-    );
-
-    let before = camera.white_balance().unwrap();
-    camera.auto_white_balance().unwrap();
-    let after = camera.white_balance().unwrap();
-
-    assert_ne!(before, after, "the gains should have been rewritten");
-    // The point of doing it in the camera rather than in the display: the
-    // values are readable afterwards, so the UI can show what it chose, and
-    // captures come out balanced too.
-    assert_eq!(camera.control(ControlId::WbRed).unwrap(), after.red);
-    assert!(after.red > 128 && after.blue > 128);
-}
-
-#[test]
 fn the_sdk_is_told_not_to_write_parameter_files() {
     // Left on, the SDK writes <model>-AST_Cfg_*.bin into the process's
     // working directory and reloads it next time a camera is opened there.

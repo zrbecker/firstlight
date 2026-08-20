@@ -398,10 +398,6 @@ pub mod sys {
             bit_depths,
             binnings: vec![Binning(1), Binning(2), Binning(3), Binning(4)],
             has_cooler: flags & (ffi::TOUPCAM_FLAG_TEC_ONOFF as u64) != 0,
-            // Toupcam has an auto-white-balance call; this backend does not
-            // use it yet, and claiming a capability it does not implement
-            // would put a button in the UI that does nothing.
-            has_auto_white_balance: false,
         }
     }
 

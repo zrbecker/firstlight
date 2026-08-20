@@ -61,9 +61,6 @@ pub struct CameraInfo {
     /// Binning factors the camera supports (always contains 1).
     pub binnings: Vec<Binning>,
     pub has_cooler: bool,
-    /// The camera can measure a white balance for itself. See
-    /// [`Camera::auto_white_balance`].
-    pub has_auto_white_balance: bool,
 }
 
 impl CameraInfo {
@@ -192,15 +189,83 @@ pub trait Camera: Send {
         Err(Error::Unsupported("white balance".into()))
     }
 
-    /// Ask the camera to measure a white balance from what it is looking at
-    /// and store the result in its own gains.
+    /// Balance the colour channels by measuring frames and adjusting the
+    /// camera's white balance gains.
     ///
     /// This changes the camera, not the display: frames captured afterwards
     /// are balanced, which is the difference between fixing a colour cast and
-    /// hiding one. Point the camera at something neutral first, or the
-    /// measurement will faithfully balance for whatever it can see.
+    /// hiding one. Point the camera at something neutral first, or it will
+    /// faithfully balance for whatever it can see.
+    ///
+    /// Implemented by measuring rather than by asking the vendor SDK, because
+    /// vendor implementations cannot be relied on: SVBONY's writes the same
+    /// fixed triple whatever the camera is looking at, which is a factory
+    /// calibration rather than a measurement. Closing the loop on the picture
+    /// works on any camera that exposes the gains.
     fn auto_white_balance(&mut self) -> Result<()> {
-        Err(Error::Unsupported("automatic white balance".into()))
+        const PASSES: u32 = 3;
+        const TOLERANCE: f64 = 0.02;
+        /// Frames discarded after a change, so the measurement reflects the
+        /// new gains rather than one already in flight.
+        const DISCARD: u32 = 3;
+        const TIMEOUT: Duration = Duration::from_secs(5);
+
+        let controls = self.controls()?;
+        let channels = [ControlId::WbRed, ControlId::WbGreen, ControlId::WbBlue];
+        if !channels
+            .iter()
+            .all(|id| controls.iter().any(|control| control.id == *id))
+        {
+            return Err(Error::Unsupported(
+                "this camera has no white balance gains".into(),
+            ));
+        }
+
+        let was_streaming = self.is_streaming();
+        if !was_streaming {
+            self.start_streaming()?;
+        }
+
+        let outcome = (|| -> Result<()> {
+            for _ in 0..PASSES {
+                let mut frame = self.next_frame(TIMEOUT)?;
+                for _ in 0..DISCARD {
+                    frame = self.next_frame(TIMEOUT)?;
+                }
+                let means = frame.channel_means().ok_or_else(|| {
+                    Error::Unsupported("a mono camera has nothing to balance".into())
+                })?;
+                // Green is the reference: a Bayer sensor has most of it, and
+                // leaving it alone keeps the overall level where it was.
+                let green = means[1].max(1.0);
+                let mut changed = false;
+                for (index, id) in [(0usize, ControlId::WbRed), (2, ControlId::WbBlue)] {
+                    let correction = green / means[index].max(1.0);
+                    if (correction - 1.0).abs() < TOLERANCE {
+                        continue;
+                    }
+                    let Some(info) = controls.iter().find(|c| c.id == id) else {
+                        continue;
+                    };
+                    let current = self.control(id)?;
+                    let target = ((current.max(1) as f64) * correction).round() as i64;
+                    let target = target.clamp(info.min.max(1), info.max);
+                    if target != current {
+                        self.set_control(id, target)?;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            Ok(())
+        })();
+
+        if !was_streaming {
+            let _ = self.stop_streaming();
+        }
+        outcome
     }
 
     // --- streaming ------------------------------------------------------

@@ -231,6 +231,44 @@ impl Frame {
         })
     }
 
+    /// Mean value of each colour channel, or `None` for a mono frame.
+    ///
+    /// Measuring the picture is the only honest basis for a white balance:
+    /// what the sensor reports is the product of the scene, the filters and
+    /// whatever gains the camera is applying, and only the result is visible
+    /// from outside.
+    pub fn channel_means(&self) -> Option<[f64; 3]> {
+        let mut sums = [0f64; 3];
+        let mut counts = [0f64; 3];
+        match self.meta.format {
+            PixelFormat::Mono => return None,
+            PixelFormat::Bayer(pattern) => {
+                for y in 0..self.meta.height {
+                    for x in 0..self.meta.width {
+                        let channel = pattern.channel_at(x, y);
+                        sums[channel] += f64::from(self.sample(x, y, 0).unwrap_or(0));
+                        counts[channel] += 1.0;
+                    }
+                }
+            }
+            PixelFormat::Rgb => {
+                for y in 0..self.meta.height {
+                    for x in 0..self.meta.width {
+                        for channel in 0..3 {
+                            sums[channel] += f64::from(self.sample(x, y, channel).unwrap_or(0));
+                            counts[channel] += 1.0;
+                        }
+                    }
+                }
+            }
+        }
+        Some([
+            sums[0] / counts[0].max(1.0),
+            sums[1] / counts[1].max(1.0),
+            sums[2] / counts[2].max(1.0),
+        ])
+    }
+
     /// All samples widened to u16, row-major, channels interleaved.
     pub fn to_u16(&self) -> Vec<u16> {
         match self.meta.bytes_per_sample() {

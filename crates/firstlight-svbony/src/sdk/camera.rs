@@ -188,8 +188,6 @@ impl SvbonyCamera {
         } else {
             PixelFormat::Mono
         };
-        // Only a colour sensor has anything to balance.
-        self.info.has_auto_white_balance = self.colour;
         self.info.binnings = property
             .SupportedBins
             .iter()
@@ -693,28 +691,6 @@ impl Camera for SvbonyCamera {
             green: self.control(ControlId::WbGreen)?,
             blue: self.control(ControlId::WbBlue)?,
         })
-    }
-
-    fn auto_white_balance(&mut self) -> Result<()> {
-        self.check_alive()?;
-        if !self.colour {
-            return Err(Error::Unsupported(
-                "automatic white balance on a mono camera".into(),
-            ));
-        }
-        // Measured on an SV305C Pro: called while video is running, this
-        // either returns success without changing the gains, or leaves the
-        // stream dead so every later frame times out — it takes frames of its
-        // own to measure with and does not give the pipeline back. Called
-        // with the stream stopped it works every time, so stop and restart
-        // around it exactly as the geometry changes do.
-        self.with_stream_stopped(|camera| camera.shared.device().white_balance_once())?;
-        let _ = self.shared.events.send(CameraEvent::Warning {
-            message: "white balance measured from the current scene and stored \
-                      in the camera"
-                .into(),
-        });
-        Ok(())
     }
 
     fn set_white_balance(&mut self, wb: WhiteBalance) -> Result<()> {

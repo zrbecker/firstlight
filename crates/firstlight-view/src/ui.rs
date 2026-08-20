@@ -235,11 +235,11 @@ fn controls_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
 
         // Shown even where it cannot be used, and disabled with a reason: a
         // button that vanishes is indistinguishable from a broken build.
-        let supported = app
-            .status
-            .camera
-            .as_ref()
-            .is_some_and(|c| c.has_auto_white_balance);
+        // Offered by any camera that exposes the gains, since the balance is
+        // measured from the picture rather than asked of the vendor SDK.
+        let supported = [ControlId::WbRed, ControlId::WbGreen, ControlId::WbBlue]
+            .iter()
+            .all(|id| controls.iter().any(|control| control.id == *id));
         let response = ui
             .add_enabled(enabled && supported, egui::Button::new("Auto WB").small())
             .on_hover_text(if supported {

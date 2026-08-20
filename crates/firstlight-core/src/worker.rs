@@ -591,19 +591,7 @@ impl Worker {
                     });
                 }
             }
-            WorkerCommand::AutoWhiteBalance => {
-                if self
-                    .with_camera("automatic white balance", |camera| {
-                        camera.auto_white_balance()
-                    })
-                    .is_some()
-                {
-                    // The camera has just rewritten its own gains; read them
-                    // back so the sliders show what it decided.
-                    self.refresh_control_values(true);
-                    self.publish_status();
-                }
-            }
+            WorkerCommand::AutoWhiteBalance => self.auto_white_balance(),
             WorkerCommand::SetAutoReconnect(on) => {
                 self.auto_reconnect = on;
                 self.next_reconnect = match (on, &self.state) {
@@ -618,6 +606,21 @@ impl Worker {
                 };
             }
             WorkerCommand::Shutdown => self.running = false,
+        }
+    }
+
+    fn auto_white_balance(&mut self) {
+        if self
+            .with_camera("automatic white balance", |camera| {
+                camera.auto_white_balance()
+            })
+            .is_some()
+        {
+            // The gains have just been rewritten; read them back so the
+            // sliders show what was chosen.
+            self.refresh_control_values(true);
+            self.read_settings();
+            self.publish_status();
         }
     }
 
