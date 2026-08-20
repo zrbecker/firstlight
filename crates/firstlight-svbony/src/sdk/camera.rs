@@ -503,6 +503,7 @@ impl Camera for SvbonyCamera {
 
         self.read_controls()?;
         self.refresh_geometry()?;
+        self.warn_about_stored_white_balance();
         let _ = self.shared.events.send(CameraEvent::Connected);
         Ok(())
     }
@@ -729,6 +730,39 @@ impl Camera for SvbonyCamera {
 
     fn events(&self) -> Receiver<CameraEvent> {
         self.events_rx.clone()
+    }
+}
+
+impl SvbonyCamera {
+    /// These cameras keep white-balance gains in non-volatile memory and the
+    /// SDK applies them to the raw frames, so a setting left behind by
+    /// another application shows up as a colour cast in recordings made here.
+    /// Worth saying out loud, because nothing else would explain it.
+    fn warn_about_stored_white_balance(&self) {
+        let mut stored = Vec::new();
+        for id in [ControlId::WbRed, ControlId::WbGreen, ControlId::WbBlue] {
+            let Some(info) = self.controls.iter().find(|c| c.id == id) else {
+                continue;
+            };
+            let Ok(value) = self.control(id) else {
+                continue;
+            };
+            if value != info.default {
+                stored.push(format!("{} {value} (default {})", info.label, info.default));
+            }
+        }
+        if stored.is_empty() {
+            return;
+        }
+        let _ = self.shared.events.send(CameraEvent::Warning {
+            message: format!(
+                "the camera has non-default white balance stored in it: {}. \
+                 The SDK applies these to the raw frames, so captures will \
+                 carry the cast; set them back to the defaults for neutral \
+                 raw data.",
+                stored.join(", ")
+            ),
+        });
     }
 }
 

@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The live view rendered colour frames with a heavy cast, alarming enough to
+  look like a broken camera. Two causes: the SV305 keeps white-balance gains
+  in the camera and the SDK applies them to raw frames, and the display used
+  one set of levels for all three channels so any cast survived. The display
+  now stretches each channel against its own histogram ("Neutralise colour",
+  on by default, display only), and the backend warns when a camera has
+  non-default white balance stored in it.
+- Frame conversion ran on the UI thread, so a 1920x1080 camera made the
+  window crawl. It now happens on a renderer thread, sized to the panel.
 - Sliders stuttered while dragging, because a status snapshot carrying the
   camera's older value could arrive mid-drag and overwrite the slider.
 - The Touptek backend was documented as covering the SVBONY SV305C Pro. It

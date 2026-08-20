@@ -327,6 +327,13 @@ fn display_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
             "Percentile histogram stretch, applied to the on-screen copy only. \
              Recorded and saved frames are never stretched.",
         );
+    ui.checkbox(&mut app.neutralise_colour, "Neutralise colour")
+        .on_hover_text(
+            "Stretch each colour channel against its own histogram, which \
+             cancels a colour cast from the sensor, the lighting, or white \
+             balance gains stored in the camera. Display only: recordings and \
+             stills keep exactly what the sensor measured.",
+        );
     ui.checkbox(&mut app.debayer, "Debayer for display")
         .on_hover_text("Off shows the raw mosaic, which makes a wrong Bayer phase obvious");
     ui.add(
