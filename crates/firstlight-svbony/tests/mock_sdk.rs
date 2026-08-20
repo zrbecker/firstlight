@@ -58,8 +58,9 @@ fn connecting_reads_the_sensor_properties() {
     assert_eq!(info.pixel_format, PixelFormat::Bayer(BayerPattern::Grbg));
     assert!((info.pixel_size_um - 2.9).abs() < 0.01);
     assert_eq!(info.binnings, vec![Binning(1), Binning(2)]);
-    // 12 significant bits in a 16-bit container, plus the 8-bit mode.
-    assert_eq!(info.bit_depths, vec![BitDepth::EIGHT, BitDepth(12)]);
+    // 8-bit, and 16-bit: the SDK left-aligns the sensor's 12 bits so the
+    // samples fill the whole 16-bit range.
+    assert_eq!(info.bit_depths, vec![BitDepth::EIGHT, BitDepth::SIXTEEN]);
     assert!(!info.has_cooler, "the SV305C Pro has no cooler");
     assert_eq!(camera.pixel_format().unwrap(), info.pixel_format);
 }
@@ -140,11 +141,14 @@ fn streaming_delivers_frames_of_the_declared_shape() {
 
     let frame = camera.next_frame(TIMEOUT).unwrap();
     assert_eq!((frame.width(), frame.height()), (1920, 1080));
-    assert_eq!(frame.meta.bit_depth, BitDepth(12));
+    assert_eq!(frame.meta.bit_depth, BitDepth::SIXTEEN);
     assert_eq!(frame.data.len(), 1920 * 1080 * 2);
     assert_eq!(frame.meta.format, PixelFormat::Bayer(BayerPattern::Grbg));
-    // 12-bit data right-aligned in a 16-bit word.
-    assert!(frame.to_u16().iter().all(|&v| v <= 0x0fff));
+    // Left-aligned: samples reach beyond 12 bits and the low nibble is clear,
+    // which is what makes reporting 16 rather than 12 the honest description.
+    let samples = frame.to_u16();
+    assert!(samples.iter().any(|&v| v > 0x0fff));
+    assert!(samples.iter().all(|&v| v & 0xf == 0));
 
     let second = camera.next_frame(TIMEOUT).unwrap();
     assert!(second.meta.sequence > frame.meta.sequence);

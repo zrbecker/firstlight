@@ -90,6 +90,8 @@ impl Shared {
     }
 }
 
+/// How many of the top bits of a 16-bit sample carry signal, for the log.
+/// The SDK scales the sensor's own depth up to fill the word.
 pub struct SvbonyCamera {
     info: CameraInfo,
     shared: Arc<Shared>,
@@ -185,7 +187,13 @@ impl SvbonyCamera {
             let depth = if sys::bytes_per_sample(format) == 1 {
                 BitDepth::EIGHT
             } else {
-                BitDepth(self.max_bit_depth)
+                // 16, not the sensor's 12: this SDK left-aligns its samples,
+                // so the delivered values fill the whole 16-bit range and the
+                // bottom four bits are always zero. Verified on an SV305C
+                // Pro, where a neutral-white-balance frame contains only
+                // multiples of 16. Reporting 12 here would make every display
+                // stretch clip to white above a sixteenth of the range.
+                BitDepth::SIXTEEN
             };
             if !depths.contains(&depth) {
                 depths.push(depth);
@@ -257,10 +265,12 @@ impl SvbonyCamera {
         let device = self.shared.device();
         let (x, y, width, height, bin) = device.roi()?;
         let image_type = device.image_type()?;
+        // See `read_properties`: 16-bit output is left-aligned, so the sample
+        // range is the full 16 bits whatever the sensor's own depth is.
         let bit_depth = if sys::bytes_per_sample(image_type) == 1 {
             BitDepth::EIGHT
         } else {
-            BitDepth(self.max_bit_depth)
+            BitDepth::SIXTEEN
         };
         let exposure_us = device.control(controls::SVB_EXPOSURE).unwrap_or(0).max(0) as u64;
         let gain = device.control(controls::SVB_GAIN).unwrap_or(0);
@@ -467,6 +477,12 @@ impl Camera for SvbonyCamera {
         self.connected = true;
 
         self.read_properties()?;
+        tracing::info!(
+            camera = %self.info.display_name,
+            sensor_bits = self.max_bit_depth,
+            "16-bit output from this SDK is left-aligned: samples fill the \
+             16-bit range and carry this many significant bits"
+        );
         // Free-running video rather than one of the trigger modes; a camera
         // left armed for a trigger delivers nothing and explains nothing.
         let _ = self.shared.device().set_normal_mode();

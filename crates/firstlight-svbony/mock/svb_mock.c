@@ -298,8 +298,12 @@ SVB_ERROR_CODE SVBGetVideoData(int id, unsigned char *buffer, long size, int wai
     } else {
         unsigned short *out = (unsigned short *)buffer;
         for (long i = 0; i < needed / 2; i++) {
-            /* 12 significant bits, right aligned, as the real sensor reports */
-            out[i] = (unsigned short)(((i + seq) * 3) & 0x0fff);
+            /*
+             * 12 significant bits left-aligned in the 16-bit word, which is
+             * what a real SV305C Pro delivers: the low four bits are always
+             * zero and the values fill the whole range.
+             */
+            out[i] = (unsigned short)((((i + seq) * 3) & 0x0fff) << 4);
         }
     }
     return SVB_SUCCESS;
