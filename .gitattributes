@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+# Vendor SDK artefacts, should they ever be committed by accident.
+*.dylib binary
+*.so binary
+*.lib binary
+
+# Capture files are binary containers.
+*.ser binary
+*.fits binary

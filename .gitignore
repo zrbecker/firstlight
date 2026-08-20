@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+
+# Captures
+*.ser
+*.fits
+
+# The vendor SDK is not redistributable; keep the instructions, not the files.
+/crates/firstlight-touptek/vendor/*
+!/crates/firstlight-touptek/vendor/README.md

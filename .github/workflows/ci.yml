@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # eframe needs X11/Wayland development headers to build on Linux.
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+
+      # The FFI layer, compiled and exercised against the mock camera. This is
+      # the only automated check the unsafe Touptek code gets; the vendor SDK
+      # is not redistributable, so a real `--features sdk` build cannot run
+      # here.
+      - run: cargo clippy -p firstlight-touptek --features mock-sdk --all-targets
+      - run: cargo test -p firstlight-touptek --features mock-sdk

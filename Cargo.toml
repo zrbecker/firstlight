@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/firstlight-core",
+    "crates/firstlight-touptek",
+    "crates/firstlight-cli",
+    "crates/firstlight-view",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/zrbecker/firstlight"
+
+[workspace.dependencies]
+firstlight-core = { path = "crates/firstlight-core", version = "0.1.0" }
+firstlight-touptek = { path = "crates/firstlight-touptek", version = "0.1.0" }
+
+crossbeam-channel = "0.5"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

@@ -1,0 +1,32 @@
+[package]
+name = "firstlight-touptek"
+description = "Touptek SDK backend for FirstLight (covers SVBONY SV305C Pro and other Touptek-based cameras)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["astronomy", "camera", "touptek", "svbony", "bindings"]
+categories = ["hardware-support", "api-bindings", "science"]
+build = "build.rs"
+
+[features]
+default = []
+# Compile and link against the vendor SDK. Off by default so the workspace
+# builds, tests and CI run on a machine that has never seen a camera; with the
+# feature off this crate still exposes `TouptekBackend`, it simply reports
+# that no SDK is present.
+sdk = ["dep:bindgen"]
+# Compile the FFI layer against a small mock camera written in C
+# (`mock/`), so the unsafe code is type-checked and exercised in CI without
+# the vendor SDK. Mutually exclusive with `sdk`, and never for production use.
+mock-sdk = ["dep:bindgen", "dep:cc"]
+
+[dependencies]
+firstlight-core.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+bindgen = { version = "0.72", optional = true }
+cc = { version = "1", optional = true }

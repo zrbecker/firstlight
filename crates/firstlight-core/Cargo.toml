@@ -1,0 +1,21 @@
+[package]
+name = "firstlight-core"
+description = "Backend-agnostic camera abstraction, frame types and file writers for FirstLight"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["astronomy", "camera", "astrophotography", "fits", "capture"]
+categories = ["science", "multimedia::images", "hardware-support"]
+
+[features]
+default = ["simulator"]
+# A synthetic camera backend so the CLI, the GUI and the test-suite all run
+# without any hardware or vendor SDK present.
+simulator = []
+
+[dependencies]
+crossbeam-channel.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

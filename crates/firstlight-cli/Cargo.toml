@@ -1,0 +1,30 @@
+[package]
+name = "firstlight-cli"
+description = "Command line test harness for FirstLight: enumerate cameras, record SER video, save FITS stills"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["astronomy", "camera", "ser", "fits", "capture"]
+categories = ["command-line-utilities", "science"]
+
+[[bin]]
+name = "firstlight-cli"
+path = "src/main.rs"
+
+[features]
+default = ["simulator"]
+simulator = ["firstlight-core/simulator"]
+# Talk to real hardware. Needs the vendor SDK; see
+# crates/firstlight-touptek/vendor/README.md.
+touptek = ["firstlight-touptek/sdk"]
+
+[dependencies]
+firstlight-core.workspace = true
+firstlight-touptek.workspace = true
+clap.workspace = true
+crossbeam-channel.workspace = true
+ctrlc = "3.5"
+tracing.workspace = true
+tracing-subscriber.workspace = true

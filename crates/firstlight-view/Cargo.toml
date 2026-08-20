@@ -1,0 +1,30 @@
+[package]
+name = "firstlight-view"
+description = "egui desktop application for FirstLight: live view, focus, capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["astronomy", "camera", "egui", "astrophotography", "capture"]
+categories = ["gui", "science"]
+
+[[bin]]
+name = "firstlight"
+path = "src/main.rs"
+
+[features]
+default = ["simulator"]
+simulator = ["firstlight-core/simulator"]
+# Talk to real hardware. Needs the vendor SDK; see
+# crates/firstlight-touptek/vendor/README.md.
+touptek = ["firstlight-touptek/sdk"]
+
+[dependencies]
+firstlight-core.workspace = true
+firstlight-touptek.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+eframe = "0.36"
+egui = "0.36"
