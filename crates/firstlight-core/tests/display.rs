@@ -195,7 +195,7 @@ fn cast_frame() -> Frame {
     let mut data = vec![0u8; (w * h) as usize * 2];
     for y in 0..h {
         for x in 0..w {
-            let base = 400 + (x as u32 % 32) * 300;
+            let base = 400 + (x % 32) * 300;
             let value = match BayerPattern::Rggb.channel_at(x, y) {
                 0 => base * 2,
                 1 => base,
