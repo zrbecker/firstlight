@@ -109,14 +109,24 @@ fn camera_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
         app.send(WorkerCommand::SetAutoReconnect(auto));
     }
 
-    if !app.enumeration_errors.is_empty() {
-        for error in app.enumeration_errors.clone() {
-            ui.label(
-                RichText::new(error)
-                    .small()
-                    .color(Color32::from_rgb(220, 160, 60)),
-            );
-        }
+    for error in app.enumeration_errors.clone() {
+        ui.label(
+            RichText::new(error)
+                .small()
+                .color(Color32::from_rgb(220, 160, 60)),
+        );
+    }
+
+    // Why the list may be empty for reasons that have nothing to do with what
+    // is plugged in — a backend whose SDK was not compiled in, say. Without
+    // this, "no cameras" and "this build cannot see your camera" look
+    // identical, which costs somebody an evening.
+    for note in app.backend_notes.clone() {
+        ui.label(
+            RichText::new(format!("\u{24d8} {note}"))
+                .small()
+                .color(Color32::from_rgb(150, 170, 210)),
+        );
     }
 }
 
@@ -203,37 +213,93 @@ fn capture_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
 }
 
 fn controls_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
-    ui.heading("Controls");
+    let controls = app.controls.clone();
+    let enabled = app.connected();
+
+    ui.horizontal(|ui| {
+        ui.heading("Controls");
+        let any_writable = controls.iter().any(|c| !c.read_only);
+        if ui
+            .add_enabled(
+                enabled && any_writable,
+                egui::Button::new("Reset all").small(),
+            )
+            .on_hover_text(
+                "Put every control back to the default the camera reports. \
+                 Geometry is left alone.",
+            )
+            .clicked()
+        {
+            app.reset_all_controls();
+        }
+
+        // Shown even where it cannot be used, and disabled with a reason: a
+        // button that vanishes is indistinguishable from a broken build.
+        let supported = app
+            .status
+            .camera
+            .as_ref()
+            .is_some_and(|c| c.has_auto_white_balance);
+        let response = ui
+            .add_enabled(enabled && supported, egui::Button::new("Auto WB").small())
+            .on_hover_text(if supported {
+                "Measure a white balance from what the camera is looking at and \
+                 store it in the camera, so captures come out balanced too. \
+                 Point it at something neutral first."
+            } else {
+                "This camera cannot measure its own white balance; set the WB \
+                 sliders by hand."
+            });
+        if response.clicked() {
+            app.send(WorkerCommand::AutoWhiteBalance);
+        }
+    });
     ui.add_space(4.0);
-    if app.controls.is_empty() {
+
+    if controls.is_empty() {
         ui.label(RichText::new("Connect a camera to see its controls.").color(Color32::GRAY));
         return;
     }
 
-    let controls = app.controls.clone();
-    let enabled = app.connected();
     for control in controls {
         let mut value = *app.values.get(&control.id).unwrap_or(&control.default);
         let is_exposure = control.id == ControlId::ExposureUs;
+        let at_default = value == control.default;
 
-        ui.add_enabled_ui(enabled && !control.read_only, |ui| {
-            let mut slider = egui::Slider::new(&mut value, control.min..=control.max)
-                .logarithmic(control.logarithmic)
-                .clamping(egui::SliderClamping::Always)
-                .text(control.label.clone());
-            if is_exposure {
-                slider = slider.custom_formatter(|v, _| format_exposure(v.max(0.0) as u64));
-            } else if !control.unit.is_empty() {
-                slider = slider.suffix(format!(" {}", control.unit));
+        ui.horizontal(|ui| {
+            // A camera keeps its own settings, and they are not always the
+            // ones it reports as default, so "put this back" is worth one
+            // click rather than a hunt for the right number.
+            let can_reset = enabled && !control.read_only && !at_default;
+            if ui
+                .add_enabled(can_reset, egui::Button::new("\u{21ba}").small())
+                .on_hover_text(format!("Reset to default ({})", control.default))
+                .clicked()
+            {
+                app.reset_control(control.id);
             }
-            let response = ui.add(slider);
-            if response.changed() {
-                // Coalesce while dragging, then send the final value at once
-                // so the camera ends up exactly where the pointer stopped.
-                app.set_control(control.id, value, response.drag_stopped());
-            } else if response.drag_stopped() {
-                app.set_control(control.id, value, true);
-            }
+
+            ui.add_enabled_ui(enabled && !control.read_only, |ui| {
+                // Leave room for the button; the slider takes what is left.
+                ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(60.0);
+                let mut slider = egui::Slider::new(&mut value, control.min..=control.max)
+                    .logarithmic(control.logarithmic)
+                    .clamping(egui::SliderClamping::Always)
+                    .text(control.label.clone());
+                if is_exposure {
+                    slider = slider.custom_formatter(|v, _| format_exposure(v.max(0.0) as u64));
+                } else if !control.unit.is_empty() {
+                    slider = slider.suffix(format!(" {}", control.unit));
+                }
+                let response = ui.add(slider);
+                if response.changed() {
+                    // Coalesce while dragging, then send the final value at
+                    // once so the camera ends up where the pointer stopped.
+                    app.set_control(control.id, value, response.drag_stopped());
+                } else if response.drag_stopped() {
+                    app.set_control(control.id, value, true);
+                }
+            });
         });
     }
 }
