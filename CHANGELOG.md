@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   there is nothing to install by hand. Verified against a real SV305C Pro.
 - Backends can explain why they see nothing (`Backend::unavailable_reason`),
   which the GUI and CLI both surface.
+- The live view says when it is stopped. A still picture could mean stopped,
+  stalled, lost or connecting, and all four looked the same. The frame itself
+  is left untouched — it is usually the reason the view was stopped — and a
+  "Clear image" button removes it when it is no longer wanted.
 - A preview white balance, on by default: each colour channel is stretched
   against its own histogram so the live view stays neutral wherever the camera
   is pointed, which is what other capture software does and what makes a live

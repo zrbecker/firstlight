@@ -37,6 +37,8 @@ struct Slot {
     /// Cleared when the render loop leaves, including by unwinding, so the
     /// application can tell a stopped renderer from a quiet one.
     alive: AtomicBool,
+    /// Asks the loop to forget the frame it is holding.
+    forget: AtomicBool,
     /// A panic the render loop survived, waiting to be reported.
     fault: Mutex<Option<String>>,
 }
@@ -54,6 +56,7 @@ impl Renderer {
             options: Mutex::new(options),
             stop: AtomicBool::new(false),
             alive: AtomicBool::new(true),
+            forget: AtomicBool::new(false),
             fault: Mutex::new(None),
         });
         let worker = slot.clone();
@@ -90,6 +93,16 @@ impl Renderer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
+    }
+
+    /// Forget the last frame, so nothing repaints it.
+    ///
+    /// Without this the renderer still holds the frame and redraws it the
+    /// moment any display setting changes, which would undo a clear a moment
+    /// after the user asked for it.
+    pub fn forget_frame(&self) {
+        self.slot.forget.store(true, Ordering::SeqCst);
+        *self.slot.latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Stop the render loop, for tests that need to prove the application
@@ -148,6 +161,11 @@ fn run(slot: Arc<Slot>, frames: Arc<FrameRing>) {
                 last_frame = Some(frame);
                 fresh = true;
             }
+        }
+
+        if slot.forget.swap(false, Ordering::SeqCst) {
+            last_frame = None;
+            *slot.latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
 
         let options = *slot.options.lock().unwrap_or_else(|e| e.into_inner());

@@ -524,9 +524,15 @@ pub fn central_panel(app: &mut FirstLightApp, ui: &mut egui::Ui) {
     });
 }
 
-/// A loud, permanent indication when the camera is not there. The live view
-/// keeps showing the last frame, and without this it would look live.
-fn banner(app: &FirstLightApp, ui: &mut egui::Ui) {
+/// Says what state the picture is in, above the picture rather than over it.
+///
+/// A still frame on screen can mean four different things — stopped on
+/// purpose, the camera stalled, the camera vanished, or connecting — and
+/// without this they all look identical. Deliberately not dimming or hiding
+/// the frame: a stopped live view is usually stopped so somebody can study
+/// the last frame, and obscuring it would defeat the point.
+fn banner(app: &mut FirstLightApp, ui: &mut egui::Ui) {
+    let stale_frame = !app.status.streaming && app.texture.is_some();
     let message = match &app.status.state {
         ConnectionState::Lost { reason } => Some((
             Color32::from_rgb(150, 40, 40),
@@ -543,18 +549,40 @@ fn banner(app: &FirstLightApp, ui: &mut egui::Ui) {
             Color32::from_rgb(150, 100, 30),
             "No frames arriving — the camera has stopped delivering".to_string(),
         )),
+        // Not a fault, so it does not get an alarming colour: this is just
+        // what you asked for, said out loud.
+        _ if stale_frame => Some((
+            Color32::from_rgb(70, 82, 104),
+            "Live view stopped — showing the last frame".to_string(),
+        )),
         _ => None,
     };
     let Some((colour, text)) = message else {
         return;
     };
+    let mut clear = false;
     egui::Frame::NONE
         .fill(colour)
         .inner_margin(egui::Margin::symmetric(8, 6))
         .corner_radius(egui::CornerRadius::same(4))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).color(Color32::WHITE).strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(text).color(Color32::WHITE).strong());
+                // Offered whenever a frame is sitting there not being
+                // updated, whatever the reason for that.
+                if stale_frame
+                    && ui
+                        .small_button("Clear image")
+                        .on_hover_text("Remove the frozen frame from the live view")
+                        .clicked()
+                {
+                    clear = true;
+                }
+            });
         });
+    if clear {
+        app.clear_image();
+    }
     ui.add_space(4.0);
 }
 

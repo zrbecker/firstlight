@@ -277,6 +277,18 @@ impl FirstLightApp {
         self.update_texture(ctx);
     }
 
+    /// Take the frozen frame off the live view.
+    ///
+    /// Clears the renderer's copy as well as the texture, or the next change
+    /// to a display setting would put it straight back.
+    pub fn clear_image(&mut self) {
+        self.renderer.forget_frame();
+        self.texture = None;
+        self.last_meta = None;
+        self.last_levels = (0, 0);
+        self.last_channel_levels = [(0, 0); 3];
+    }
+
     /// Notice a renderer that has stopped, say so, and start another.
     ///
     /// Without this a dead render thread leaves the last image on screen

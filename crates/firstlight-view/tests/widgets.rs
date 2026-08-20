@@ -256,3 +256,59 @@ fn the_preview_white_balance_is_labelled_and_visible() {
     // And the live view says it is being corrected.
     assert!(ui.shows("WB preview"), "painted: {:#?}", ui.painted);
 }
+
+#[test]
+fn a_stopped_live_view_says_so_without_covering_the_frame() {
+    // Four things can leave a still picture on screen — stopped, stalled,
+    // lost, connecting — and they used to look identical. The frame itself
+    // is left alone deliberately: it is usually why the view was stopped.
+    let mut ui = Ui::new();
+    ui.connect();
+    ui.app.send(WorkerCommand::StartStream);
+    ui.run_until("a frame on screen", |ui| ui.app.texture.is_some());
+
+    ui.app.send(WorkerCommand::StopStream);
+    ui.run_until("the stopped banner", |ui| ui.shows("Live view stopped"));
+
+    // The picture is still there and still drawn.
+    assert!(
+        ui.app.texture.is_some(),
+        "the frame should not be discarded"
+    );
+    assert!(
+        shows_live_image(&ui.last_shapes),
+        "the frame should still be painted"
+    );
+    assert!(ui.shows("Clear image"), "painted: {:#?}", ui.painted);
+}
+
+#[test]
+fn clearing_the_image_sticks() {
+    let mut ui = Ui::new();
+    ui.connect();
+    ui.app.send(WorkerCommand::StartStream);
+    ui.run_until("a frame on screen", |ui| ui.app.texture.is_some());
+    ui.app.send(WorkerCommand::StopStream);
+    ui.run_until("the stream to stop", |ui| !ui.app.status.streaming);
+
+    ui.app.clear_image();
+    ui.frame();
+    assert!(ui.app.texture.is_none(), "the image should be gone");
+
+    // The renderer holds the last frame and redraws it whenever a display
+    // setting changes, so a clear that does not reach it comes undone a
+    // moment later.
+    ui.app.white_balance_preview = !ui.app.white_balance_preview;
+    for _ in 0..20 {
+        ui.frame();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        ui.app.texture.is_none(),
+        "the cleared image came back when a display setting changed"
+    );
+    assert!(
+        !shows_live_image(&ui.last_shapes),
+        "a cleared live view should not still be painting a frame"
+    );
+}
