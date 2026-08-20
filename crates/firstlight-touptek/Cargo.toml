@@ -1,6 +1,6 @@
 [package]
 name = "firstlight-touptek"
-description = "Touptek SDK backend for FirstLight (covers SVBONY SV305C Pro and other Touptek-based cameras)"
+description = "Touptek SDK backend for FirstLight (Touptek and the cameras rebadged from it: Altair, Omegon, RisingCam, Bresser)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

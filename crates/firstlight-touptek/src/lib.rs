@@ -1,7 +1,14 @@
 //! # firstlight-touptek
 //!
 //! [`firstlight_core::Camera`] over the Touptek SDK, which also drives the
-//! SVBONY SV305C Pro and the rebadged Altair, Omegon and RisingCam models.
+//! cameras rebadged from Touptek hardware: Altair, Omegon, RisingCam,
+//! Bresser, Meade and others, each shipping the same library under its own
+//! symbol prefix.
+//!
+//! It does **not** cover every camera sold by those brands. SVBONY in
+//! particular ships both kinds: some models are Touptek-based (the SDK calls
+//! them `svbonycam`), while the SV305 series uses SVBONY's own, unrelated
+//! SDK and is invisible to this backend.
 //!
 //! ## Building
 //!

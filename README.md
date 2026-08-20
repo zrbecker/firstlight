@@ -17,7 +17,7 @@ running when the hardware does not.
 ```
 firstlight/
 ├── crates/firstlight-core      the Camera trait, frames, SER/FITS writers, worker thread, simulator
-├── crates/firstlight-touptek   Touptek SDK backend (SVBONY SV305C Pro and relatives)
+├── crates/firstlight-touptek   Touptek SDK backend (Altair, Omegon, RisingCam, Bresser, ...)
 ├── crates/firstlight-cli       command line harness: list, capture, snap, watch
 └── crates/firstlight-view      egui desktop app; the binary is called `firstlight`
 ```
@@ -199,8 +199,9 @@ exception worth being explicit about:
   under `--features mock-sdk`.
 * **It has not been built against the real vendor header, or run against real
   hardware.** The mock is written from the vendor's published API and is only
-  as accurate as that reading. A first run with a real SV305C Pro should be
-  treated as exactly that: a first run.
+  as accurate as that reading. Every symbol it calls does exist in a shipping
+  `libtoupcam.dylib` (checked against the copy INDIGO distributes), but that
+  says nothing about behaviour. A first run should be treated as exactly that.
 
 ## Platform notes
 

@@ -74,7 +74,13 @@ mod vendor {
             let dir = PathBuf::from(dir);
             assert!(
                 dir.is_dir(),
-                "FIRSTLIGHT_TOUPTEK_SDK_DIR points at {}, which is not a directory",
+                "FIRSTLIGHT_TOUPTEK_SDK_DIR points at {}, which is not a directory.\n\
+                 The Touptek SDK is a free download from \
+                 https://www.touptek-astro.com/download/ (pick the macOS/Windows/Linux\n\
+                 SDK, not the Windows application). Unpack it and point this variable at\n\
+                 the directory containing inc/toupcam.h.\n\
+                 Note that not every camera speaks this SDK: SVBONY's SV305 series uses\n\
+                 SVBONY's own SDK instead. See crates/firstlight-touptek/vendor/README.md.",
                 dir.display()
             );
             return dir;

@@ -24,7 +24,8 @@ see "What is verified, and what is not" in the README.
   copies.
 - `firstlight-core::simulator`: a synthetic star field with fault injection
   for unplug, USB stall, frame freeze, busy device and slow control calls.
-- `firstlight-touptek`: Touptek SDK backend behind the `sdk` feature, with a
+- `firstlight-touptek`: Touptek SDK backend (Touptek and its rebadges)
+  behind the `sdk` feature, with a
   `mock-sdk` feature that compiles and exercises the FFI layer against a small
   C camera so the unsafe code is covered in CI.
 - `firstlight-cli`: `list`, `info`, `capture`, `snap` and `watch`.

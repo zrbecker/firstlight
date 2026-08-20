@@ -4,8 +4,14 @@ This directory is where the vendor SDK goes. Nothing in it is redistributable,
 so it is git-ignored and the `sdk` feature is off by default.
 
 1. Download the "Windows/macOS/Linux SDK" archive from
-   <https://www.touptek-astro.com/download/> (SVBONY ship the same SDK for the
-   SV305C Pro; either vendor's copy works).
+   <https://www.touptek-astro.com/download/>. The rebadgers (Altair, Omegon,
+   RisingCam, Bresser) ship the same library under their own name and symbol
+   prefix; any of those copies works if you adjust the linked library name.
+
+   This is the wrong SDK for some cameras sold under those brands. SVBONY's
+   SV305 series, for instance, uses SVBONY's own SDK
+   (<https://www.svbony.com/Support/SoftWare-Driver/>) and does not enumerate
+   through Touptek's at all.
 2. Unpack it here, so that this directory contains:
 
    ```

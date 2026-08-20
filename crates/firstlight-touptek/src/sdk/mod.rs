@@ -22,8 +22,10 @@ use crate::BACKEND_NAME;
 
 /// Discovery and opening for Touptek-compatible cameras.
 ///
-/// The same SDK drives SVBONY (SV305C Pro and friends), Altair, Omegon,
-/// RisingCam and Touptek's own models, so one backend covers all of them.
+/// The same SDK drives Altair, Omegon, RisingCam, Bresser and Touptek's own
+/// models, so one backend covers all of them. Cameras that are not built on
+/// Touptek hardware — SVBONY's SV305 series among them — will not enumerate
+/// here however healthy they are.
 #[derive(Debug, Default)]
 pub struct TouptekBackend;
 
