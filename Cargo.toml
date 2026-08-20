@@ -30,3 +30,14 @@ anyhow = "1"
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+# A debug build still has to push a megapixel of image data around several
+# times a second. At opt-level 0 that costs over a hundred milliseconds a
+# frame, which makes the application feel broken when the only thing wrong is
+# the profile. Optimise dependencies and the pixel-handling crate while
+# leaving the application crates debuggable.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.firstlight-core]
+opt-level = 3

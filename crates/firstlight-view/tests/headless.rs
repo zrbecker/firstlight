@@ -361,3 +361,46 @@ fn a_status_update_does_not_yank_a_slider_the_user_is_holding() {
         app.status.settings.gain == 250
     });
 }
+
+#[test]
+fn a_full_size_sensor_does_not_slow_the_window_down() {
+    // The regression this exists for: frame conversion used to happen on the
+    // UI thread, so a 1920x1080 camera made every repaint take over a
+    // hundred milliseconds. The earlier tests all used a 64x48 simulator and
+    // sailed straight past it.
+    let backend = Arc::new(SimulatorBackend::single(
+        1920,
+        1080,
+        PixelFormat::Bayer(BayerPattern::Rggb),
+    ));
+    let sim = backend.handle(0).unwrap();
+    let registry = Registry::new().with(backend as Arc<dyn Backend>);
+    let ctx = egui::Context::default();
+    let app = FirstLightApp::new(&ctx, registry);
+    let mut harness = Harness { ctx, app, sim };
+
+    harness.connect();
+    harness.app.send(WorkerCommand::SetControl {
+        id: firstlight_core::ControlId::ExposureUs,
+        value: 5_000,
+    });
+    harness.app.send(WorkerCommand::StartStream);
+    harness.run_until("a frame on screen", |app| app.texture.is_some());
+
+    let mut slowest = Duration::ZERO;
+    for _ in 0..60 {
+        slowest = slowest.max(harness.frame());
+    }
+    assert!(
+        slowest < Duration::from_millis(50),
+        "a UI frame took {slowest:?} with a 1920x1080 camera streaming"
+    );
+
+    // And the texture is sized to the window rather than to the sensor.
+    let texture = harness.app.texture.as_ref().unwrap();
+    assert!(
+        texture.size()[0] <= 1400,
+        "texture is {:?} for a window about 1280 wide",
+        texture.size()
+    );
+}

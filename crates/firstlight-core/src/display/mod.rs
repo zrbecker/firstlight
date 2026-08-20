@@ -78,6 +78,14 @@ impl DisplayImage {
 }
 
 /// Render a frame for display.
+///
+/// The inner loops here matter: at 1920x1080 this runs on every delivered
+/// frame, and a naive implementation (a bounds-checked accessor call per
+/// sample, a colour-filter lookup per sample) costs over a hundred
+/// milliseconds per frame in a debug build — enough to make the whole
+/// application feel broken. So the colour filter phase is resolved once per
+/// frame rather than per pixel, rows are indexed directly, and the histogram
+/// is accumulated in the same pass that reads the pixels.
 pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
     let bayer = frame.meta.format.bayer();
     let mut step = options.subsample.max(1);
@@ -94,55 +102,82 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
     };
     let (out_w, out_h) = (out_w.max(1), out_h.max(1));
 
+    let data = &frame.data;
+    let stride = frame.meta.stride();
+    let bps = frame.meta.bytes_per_sample();
+    let spp = frame.meta.format.samples_per_pixel();
+    let full_scale = frame.meta.bit_depth.max_value() as u16;
+
     let mut rgb: Vec<[u16; 3]> = Vec::with_capacity(out_w as usize * out_h as usize);
+    // Histogram of luminance, accumulated as we read so the pixels are only
+    // walked once. Only actually consulted for an auto stretch.
+    let mut histogram = vec![0u32; BINS];
+    let bin_scale = (BINS - 1) as f32 / f32::from(full_scale.max(1));
+
+    let note = |histogram: &mut Vec<u32>, px: [u16; 3]| {
+        let lum = (u32::from(px[0]) + 2 * u32::from(px[1]) + u32::from(px[2])) / 4;
+        let bin = ((lum as f32 * bin_scale) as usize).min(BINS - 1);
+        histogram[bin] += 1;
+    };
+
     match (bayer, options.debayer) {
         (Some(pattern), true) => {
+            // Every 2x2 cell we sample starts on an even boundary, so the
+            // filter phase is the same for all of them: work out which corner
+            // is which colour once.
+            let corner = |dx: u32, dy: u32| pattern.channel_at(dx, dy);
+            let corners = [
+                (0u32, 0u32, corner(0, 0)),
+                (1, 0, corner(1, 0)),
+                (0, 1, corner(0, 1)),
+                (1, 1, corner(1, 1)),
+            ];
             for oy in 0..out_h {
-                let sy = oy * 2 * step;
+                let sy = (oy * 2 * step) as usize;
                 for ox in 0..out_w {
-                    let sx = ox * 2 * step;
+                    let sx = (ox * 2 * step) as usize;
                     let mut sums = [0u32; 3];
                     let mut counts = [0u32; 3];
-                    for dy in 0..2 {
-                        for dx in 0..2 {
-                            let c = pattern.channel_at(sx + dx, sy + dy);
-                            if let Some(v) = frame.sample(sx + dx, sy + dy, 0) {
-                                sums[c] += u32::from(v);
-                                counts[c] += 1;
-                            }
-                        }
+                    for (dx, dy, channel) in corners {
+                        let offset = (sy + dy as usize) * stride + (sx + dx as usize) * bps;
+                        sums[channel] += u32::from(read_sample(data, offset, bps));
+                        counts[channel] += 1;
                     }
-                    rgb.push([
+                    let px = [
                         (sums[0] / counts[0].max(1)) as u16,
                         (sums[1] / counts[1].max(1)) as u16,
                         (sums[2] / counts[2].max(1)) as u16,
-                    ]);
+                    ];
+                    note(&mut histogram, px);
+                    rgb.push(px);
                 }
             }
         }
         _ => {
-            let spp = frame.meta.format.samples_per_pixel();
             for oy in 0..out_h {
-                let sy = (oy * step).min(src_h.saturating_sub(1));
+                let sy = (oy * step).min(src_h.saturating_sub(1)) as usize;
+                let row = sy * stride;
                 for ox in 0..out_w {
-                    let sx = (ox * step).min(src_w.saturating_sub(1));
-                    if spp >= 3 {
-                        rgb.push([
-                            frame.sample(sx, sy, 0).unwrap_or(0),
-                            frame.sample(sx, sy, 1).unwrap_or(0),
-                            frame.sample(sx, sy, 2).unwrap_or(0),
-                        ]);
+                    let sx = (ox * step).min(src_w.saturating_sub(1)) as usize;
+                    let offset = row + sx * spp * bps;
+                    let px = if spp >= 3 {
+                        [
+                            read_sample(data, offset, bps),
+                            read_sample(data, offset + bps, bps),
+                            read_sample(data, offset + 2 * bps, bps),
+                        ]
                     } else {
-                        let v = frame.sample(sx, sy, 0).unwrap_or(0);
-                        rgb.push([v, v, v]);
-                    }
+                        let v = read_sample(data, offset, bps);
+                        [v, v, v]
+                    };
+                    note(&mut histogram, px);
+                    rgb.push(px);
                 }
             }
         }
     }
 
-    let full_scale = frame.meta.bit_depth.max_value() as u16;
-    let (black, white) = levels(&rgb, options.stretch, full_scale);
+    let (black, white) = levels(&histogram, rgb.len(), options.stretch, full_scale);
     let rgba = map_to_rgba(&rgb, black, white, options.gamma);
 
     DisplayImage {
@@ -154,37 +189,48 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
     }
 }
 
+/// One sample, without the per-call geometry arithmetic of
+/// [`Frame::sample`]. Out-of-range reads yield zero rather than panicking:
+/// a display is not worth crashing over.
+#[inline(always)]
+fn read_sample(data: &[u8], offset: usize, bytes_per_sample: usize) -> u16 {
+    if bytes_per_sample == 1 {
+        data.get(offset).copied().map(u16::from).unwrap_or(0)
+    } else {
+        match (data.get(offset), data.get(offset + 1)) {
+            (Some(&low), Some(&high)) => u16::from_le_bytes([low, high]),
+            _ => 0,
+        }
+    }
+}
+
 /// Number of histogram bins. 4096 keeps a 16-bit percentile accurate to ~16
 /// ADU, which is far below anything visible after an 8-bit map.
 const BINS: usize = 4096;
 
 /// Black and white points for the requested stretch.
-fn levels(rgb: &[[u16; 3]], stretch: Stretch, full_scale: u16) -> (u16, u16) {
+///
+/// The histogram is of luminance rather than of each channel: per-channel
+/// percentiles would silently white-balance the display.
+fn levels(histogram: &[u32], pixels: usize, stretch: Stretch, full_scale: u16) -> (u16, u16) {
     match stretch {
         Stretch::Linear => (0, full_scale.max(1)),
         Stretch::Manual { black, white } => (black, white.max(black.saturating_add(1))),
         Stretch::AutoPercentile { low_pct, high_pct } => {
-            if rgb.is_empty() {
+            if pixels == 0 {
                 return (0, full_scale.max(1));
             }
             let scale = f32::from(full_scale.max(1));
-            let mut histogram = vec![0u32; BINS];
-            // Histogram the luminance, not each channel: per-channel
-            // percentiles would silently white-balance the display.
-            for px in rgb {
-                let lum = (u32::from(px[0]) + 2 * u32::from(px[1]) + u32::from(px[2])) / 4;
-                let bin = ((lum as f32 / scale) * (BINS - 1) as f32).clamp(0.0, (BINS - 1) as f32);
-                histogram[bin as usize] += 1;
-            }
-            let total = rgb.len() as f32;
+            let total = pixels as f32;
             let low_target = (total * (low_pct.clamp(0.0, 100.0) / 100.0)) as u32;
             let high_target = (total * (high_pct.clamp(0.0, 100.0) / 100.0)) as u32;
 
             let mut cumulative = 0u32;
+            let histogram = histogram.iter();
             let mut black = 0usize;
             let mut white = BINS - 1;
             let mut black_found = false;
-            for (bin, count) in histogram.iter().enumerate() {
+            for (bin, count) in histogram.enumerate() {
                 cumulative += count;
                 if !black_found && cumulative >= low_target {
                     black = bin;

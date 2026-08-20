@@ -6,12 +6,14 @@ use std::time::{Duration, Instant};
 
 use firstlight_core::camera::{CameraId, CameraInfo};
 use firstlight_core::control::{Binning, BitDepth, ControlId, ControlInfo, Roi};
-use firstlight_core::display::{self, DisplayOptions, Stretch};
+use firstlight_core::display::{DisplayOptions, Stretch};
 use firstlight_core::frame::FrameMeta;
 use firstlight_core::registry::Registry;
 use firstlight_core::worker::{
     ConnectionState, WorkerCommand, WorkerHandle, WorkerStatus, WorkerUpdate, timestamped_name,
 };
+
+use crate::render::Renderer;
 
 /// Control writes go over USB. Dragging a slider must not turn into hundreds
 /// of them, so values are coalesced and sent at most this often; the final
@@ -26,9 +28,10 @@ const CONTROL_THROTTLE: Duration = Duration::from_millis(120);
 /// smoothly" looks like.
 const CONTROL_SETTLE: Duration = Duration::from_millis(600);
 
-/// Longest edge of the texture we upload. Larger frames are subsampled for
-/// display only — the recorded and saved data is always full resolution.
-const MAX_DISPLAY_EDGE: u32 = 1600;
+/// Hard cap on the texture we upload, whatever the window size. Larger frames
+/// are subsampled for display only — recorded and saved data is always full
+/// resolution.
+const MAX_DISPLAY_EDGE: u32 = 2048;
 
 const LOG_LIMIT: usize = 300;
 
@@ -102,6 +105,10 @@ pub struct FirstLightApp {
     pub status: WorkerStatus,
     pub log: VecDeque<LogLine>,
 
+    renderer: Renderer,
+    /// Width of the image panel at the last repaint, so no more pixels are
+    /// rendered than can actually be shown.
+    pub viewport_width: f32,
     pub texture: Option<egui::TextureHandle>,
     pub last_meta: Option<FrameMeta>,
     /// Levels the last auto-stretch settled on, shown in the UI.
@@ -126,12 +133,15 @@ impl FirstLightApp {
     pub fn new(ctx: &egui::Context, registry: Registry) -> FirstLightApp {
         ctx.set_visuals(egui::Visuals::dark());
         let worker = WorkerHandle::spawn(registry);
+        let renderer = Renderer::spawn(worker.frame_ring(), DisplayOptions::default());
         let output_dir = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
 
         FirstLightApp {
             worker,
+            renderer,
+            viewport_width: 1024.0,
             cameras: Vec::new(),
             enumeration_errors: Vec::new(),
             backend_notes: Vec::new(),
@@ -325,18 +335,25 @@ impl FirstLightApp {
         }
     }
 
-    /// Convert the newest frame into a texture. Runs at most once per
-    /// repaint, and only when a new frame actually arrived.
-    fn update_texture(&mut self, ctx: &egui::Context) {
-        let Some(frame) = self.worker.latest_frame() else {
-            return;
+    /// The display settings the renderer should be using.
+    ///
+    /// Subsampling is chosen from the panel width: rendering four times the
+    /// pixels the window can show is pure cost.
+    fn display_options(&self) -> DisplayOptions {
+        let target = (self.viewport_width.max(320.0) as u32).min(MAX_DISPLAY_EDGE);
+        let subsample = match &self.last_meta {
+            Some(meta) if meta.width > 0 => {
+                // The Bayer path already produces one pixel per 2x2 cell.
+                let produced = if self.debayer && meta.format.bayer().is_some() {
+                    meta.width / 2
+                } else {
+                    meta.width
+                };
+                (produced / target.max(1)).max(1)
+            }
+            _ => 1,
         };
-
-        // Subsample large sensors for display only. A 26 MPix frame does not
-        // need to become a 26 MPix texture to be focused on.
-        let longest = frame.width().max(frame.height());
-        let subsample = (longest / MAX_DISPLAY_EDGE.max(1)).max(1);
-        self.display = DisplayOptions {
+        DisplayOptions {
             stretch: if self.auto_stretch {
                 Stretch::auto()
             } else {
@@ -345,11 +362,23 @@ impl FirstLightApp {
             debayer: self.debayer,
             subsample,
             gamma: self.gamma,
-        };
+        }
+    }
 
-        let image = display::render(&frame, &self.display);
+    /// Collect whatever the renderer has finished and hand it to the GPU.
+    ///
+    /// This is the only frame work left on the UI thread, and it is a texture
+    /// upload rather than a per-pixel conversion.
+    fn update_texture(&mut self, ctx: &egui::Context) {
+        self.display = self.display_options();
+        self.renderer.set_options(self.display);
+
+        let Some(rendered) = self.renderer.take() else {
+            return;
+        };
+        let image = rendered.image;
         self.last_levels = (image.black, image.white);
-        self.last_meta = Some(frame.meta.clone());
+        self.last_meta = Some(rendered.meta);
 
         let colour = egui::ColorImage::from_rgba_unmultiplied(
             [image.width as usize, image.height as usize],

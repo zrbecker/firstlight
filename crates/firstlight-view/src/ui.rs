@@ -489,6 +489,10 @@ fn image_area(app: &mut FirstLightApp, ui: &mut egui::Ui) {
     });
     ui.add_space(4.0);
 
+    // Remembered so the renderer sizes its output to the window rather than
+    // producing pixels nothing can show.
+    app.viewport_width = ui.available_size().x.max(320.0);
+
     let Some(texture) = &app.texture else {
         ui.centered_and_justified(|ui| {
             ui.label(

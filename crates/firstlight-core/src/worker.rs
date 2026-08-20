@@ -290,6 +290,16 @@ impl WorkerHandle {
         self.frames.dropped()
     }
 
+    /// The queue frames arrive on.
+    ///
+    /// Handed out so a caller can do its own rendering on its own thread
+    /// rather than converting frames on whatever thread happens to be
+    /// drawing. Taking frames from here means [`WorkerHandle::latest_frame`]
+    /// will not see them: pick one or the other.
+    pub fn frame_ring(&self) -> Arc<FrameRing> {
+        self.frames.clone()
+    }
+
     /// Stop the worker and wait for it, finalising any recording.
     pub fn shutdown(mut self) {
         self.shutdown_inner();

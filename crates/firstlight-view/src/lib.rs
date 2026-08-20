@@ -10,6 +10,7 @@
 //! camera that stalls or vanishes cannot stall the window.
 
 pub mod app;
+pub mod render;
 pub mod ui;
 
 pub use app::FirstLightApp;
