@@ -43,6 +43,13 @@ use crate::controls;
 /// flag and queued control writes responsive during long exposures.
 const READ_SLICE_MS: i32 = 100;
 
+/// Exposure used for the probe that proves the camera delivers.
+const PROBE_EXPOSURE_US: i64 = 10_000;
+/// How long that probe waits for its frame.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+/// How many times to re-open a camera that accepts calls but stays silent.
+const DELIVERY_ATTEMPTS: u32 = 4;
+
 /// How long to keep trying to open a camera that was recently closed.
 const OPEN_RETRY_WINDOW: Duration = Duration::from_secs(5);
 const OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(200);
@@ -530,42 +537,8 @@ impl Camera for SvbonyCamera {
         self.shared.lost.store(false, Ordering::SeqCst);
         self.connected = true;
 
-        self.read_properties()?;
-        tracing::info!(
-            camera = %self.info.display_name,
-            sensor_bits = self.max_bit_depth,
-            "16-bit output from this SDK is left-aligned: samples fill the \
-             16-bit range and carry this many significant bits"
-        );
-        // Free-running video rather than one of the trigger modes; a camera
-        // left armed for a trigger delivers nothing and explains nothing.
-        let _ = self.shared.device().set_normal_mode();
-
-        // Stop the SDK writing a parameter file into whatever directory the
-        // application happens to have been launched from, and reloading it
-        // next time. That mechanism makes the camera's settings depend on the
-        // working directory — two launches from different places see
-        // different cameras — and leaves stray .bin files behind. What the
-        // camera holds should be the only state there is.
-        let _ = self.shared.device().set_auto_save(false);
-
-        // Deepest mode the sensor offers, which is what an imager wants by
-        // default; 8 bit is a deliberate choice for frame rate, not a default.
-        let depth = self
-            .info
-            .bit_depths
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(BitDepth::EIGHT);
-        let image_type = sys::image_type_for(depth, self.colour);
-        self.shared.device().set_image_type(image_type)?;
-        let (width, height) = (self.info.max_width, self.info.max_height);
-        self.shared.device().set_roi(0, 0, width, height, 1)?;
-
-        self.read_controls()?;
-        self.refresh_geometry()?;
-        self.warn_about_stored_white_balance();
+        self.configure()?;
+        self.verify_delivery()?;
         let _ = self.shared.events.send(CameraEvent::Connected);
         Ok(())
     }
@@ -823,6 +796,122 @@ impl Camera for SvbonyCamera {
 }
 
 impl SvbonyCamera {
+    /// Everything that has to be set up on a freshly opened camera.
+    fn configure(&mut self) -> Result<()> {
+        self.read_properties()?;
+        tracing::info!(
+            camera = %self.info.display_name,
+            sensor_bits = self.max_bit_depth,
+            "16-bit output from this SDK is left-aligned: samples fill the \
+             16-bit range and carry this many significant bits"
+        );
+        // Free-running video rather than one of the trigger modes; a camera
+        // left armed for a trigger delivers nothing and explains nothing.
+        let _ = self.shared.device().set_normal_mode();
+
+        // Stop the SDK writing a parameter file into whatever directory the
+        // application happens to have been launched from, and reloading it
+        // next time. That mechanism makes the camera's settings depend on the
+        // working directory — two launches from different places see
+        // different cameras — and leaves stray .bin files behind. What the
+        // camera holds should be the only state there is.
+        let _ = self.shared.device().set_auto_save(false);
+
+        // Deepest mode the sensor offers, which is what an imager wants by
+        // default; 8 bit is a deliberate choice for frame rate, not a default.
+        let depth = self
+            .info
+            .bit_depths
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(BitDepth::EIGHT);
+        let image_type = sys::image_type_for(depth, self.colour);
+        self.shared.device().set_image_type(image_type)?;
+        let (width, height) = (self.info.max_width, self.info.max_height);
+        self.shared.device().set_roi(0, 0, width, height, 1)?;
+
+        self.read_controls()?;
+        self.refresh_geometry()?;
+        self.warn_about_stored_white_balance();
+        Ok(())
+    }
+
+    /// Prove the camera actually delivers a frame, and heal it if it does not.
+    ///
+    /// Measured on an SV305C Pro: a camera opened soon after being closed —
+    /// by another process, so no amount of bookkeeping here can predict it —
+    /// comes back as a handle that accepts every call and silently never
+    /// delivers. Closing and opening it again clears the condition. Without
+    /// this, `connect` succeeds and the live view simply never starts, which
+    /// is precisely the kind of silent failure this library exists to avoid.
+    fn verify_delivery(&mut self) -> Result<()> {
+        for attempt in 1..=DELIVERY_ATTEMPTS {
+            if self.probe_one_frame()? {
+                return Ok(());
+            }
+            if attempt == DELIVERY_ATTEMPTS {
+                break;
+            }
+            let _ = self.shared.events.send(CameraEvent::Warning {
+                message: format!(
+                    "the camera accepted the stream but delivered nothing; \
+                     re-opening it (attempt {attempt})"
+                ),
+            });
+            self.shared.device().close();
+            self.open_with_retry()?;
+            self.configure()?;
+        }
+        Err(Error::other(
+            "the camera accepts every call but never delivers a frame; \
+             unplug it and plug it back in",
+        ))
+    }
+
+    /// Start video briefly and see whether anything arrives.
+    ///
+    /// Uses a short exposure of its own so a camera left on a long one does
+    /// not look broken, and puts the exposure back afterwards.
+    fn probe_one_frame(&mut self) -> Result<bool> {
+        let geometry = self.shared.geometry();
+        let mut buffer = vec![0u8; geometry.frame_bytes().max(1)];
+        let saved_exposure = {
+            let device = self.shared.device();
+            let saved = device.control(controls::SVB_EXPOSURE).ok();
+            let _ = device.set_control(controls::SVB_EXPOSURE, PROBE_EXPOSURE_US, false);
+            device.start_video()?;
+            saved
+        };
+
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        let mut delivered = false;
+        while Instant::now() < deadline {
+            let device = self.shared.device();
+            match device.read_frame(&mut buffer, 100) {
+                Ok(true) => {
+                    delivered = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    drop(device);
+                    let _ = self.shared.device().stop_video();
+                    return Err(e);
+                }
+            }
+        }
+
+        let device = self.shared.device();
+        let _ = device.stop_video();
+        if let Some(exposure) = saved_exposure {
+            let _ = device.set_control(controls::SVB_EXPOSURE, exposure, false);
+        }
+        drop(device);
+        thread::sleep(RESTART_SETTLE);
+        Ok(delivered)
+    }
+
     /// Open the camera, re-enumerating if the SDK says the id is unknown.
     ///
     /// Measured on an SV305C Pro: for about a second after the camera has
