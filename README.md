@@ -17,6 +17,7 @@ running when the hardware does not.
 ```
 firstlight/
 ├── crates/firstlight-core      the Camera trait, frames, SER/FITS writers, worker thread, simulator
+├── crates/firstlight-svbony    SVBONY SDK backend (SV305 series and relatives)
 ├── crates/firstlight-touptek   Touptek SDK backend (Altair, Omegon, RisingCam, Bresser, ...)
 ├── crates/firstlight-cli       command line harness: list, capture, snap, watch
 └── crates/firstlight-view      egui desktop app; the binary is called `firstlight`
@@ -34,13 +35,26 @@ cargo run -p firstlight-cli -- snap  -e 2s --bits 16 -o m42.fits
 cargo run -p firstlight-view          # the GUI, binary name `firstlight`
 ```
 
-With real hardware, add the vendor SDK (see
-[`crates/firstlight-touptek/vendor/README.md`](crates/firstlight-touptek/vendor/README.md))
-and build with the `touptek` feature:
+With real hardware, turn on the backend for your camera. **SVBONY needs
+nothing installed** — the SDK is downloaded and checked automatically the
+first time you build:
+
+```sh
+cargo run -p firstlight-view --features svbony
+cargo run -p firstlight-cli --features svbony -- list
+```
+
+Touptek's SDK has no stable download URL to pin, so that one is still a manual
+drop; see [`crates/firstlight-touptek/vendor/README.md`](crates/firstlight-touptek/vendor/README.md).
 
 ```sh
 FIRSTLIGHT_TOUPTEK_SDK_DIR=~/sdk/toupcam cargo run -p firstlight-view --features touptek
 ```
+
+**Which backend?** SVBONY sells cameras of both kinds. The SV305 series
+enumerates under SVBONY's own USB vendor id and needs `--features svbony`;
+their Touptek-based models need `--features touptek`. Build with both if you
+are not sure — a backend that sees nothing says so instead of failing.
 
 ## Architecture
 
@@ -168,6 +182,35 @@ After a reconnect the worker restores bit depth, binning, ROI and every
 control the user had set, and restarts the stream if it was running — so a
 replug is invisible apart from the gap.
 
+## Vendor SDKs
+
+Neither vendor SDK carries a licence. Not "a restrictive licence" — no
+copyright notice in the header, no `LICENSE` in the archive, nothing on either
+vendor's site. The default position for software with no written grant is all
+rights reserved, so **this repository redistributes neither of them**, however
+common it is elsewhere.
+
+That does not have to mean manual steps. `firstlight-svbony`'s build script
+fetches what it needs:
+
+| Piece | Source | Checked |
+| --- | --- | --- |
+| `SVBCameraSDK.h` | INDIGO's vendored copy, pinned commit | SHA-256 |
+| `libSVBCameraSDK.dylib` (macOS, universal) | INDIGO's vendored copy, pinned commit | SHA-256 |
+| `libSVBCameraSDK.so` (Linux x86-64 / arm64) | indi-3rdparty, pinned commit | SHA-256 |
+| libusb (macOS only) | system copy if present, else built from the pinned upstream release | SHA-256 |
+
+Everything is cached under the user's cache directory, so it happens once per
+machine. `FIRSTLIGHT_SVBONY_SDK_DIR` points the build at a local SDK instead,
+`FIRSTLIGHT_SDK_CACHE` moves the cache, and `FIRSTLIGHT_OFFLINE=1` refuses to
+download and says what to fetch by hand.
+
+macOS has no system libusb and the SVBONY library needs one, so the build
+takes a Homebrew or `/usr/local` copy if there is one and otherwise compiles
+libusb 1.0.27 from source — it ships an `Xcode/config.h` for exactly this, so
+it is a nine-file compile rather than a build system. libusb is LGPL-2.1 and
+its licence text is written next to the built library.
+
 ## Testing
 
 ```sh
@@ -197,6 +240,13 @@ exception worth being explicit about:
 * Its FFI layer — callback, pull path, teardown ordering, HRESULT mapping —
   compiles and runs against a mock camera written in C (`crates/firstlight-touptek/mock/`)
   under `--features mock-sdk`.
+
+The SVBONY backend is in better shape: its mock compiles against the vendor's
+own header, and it has been run against a real SV305C Pro — enumeration,
+control table, ROI, binning, 8- and 16-bit capture, SER recording and FITS
+stills all verified on the hardware. One thing that measurement changed: the
+SDK left-aligns its 16-bit output, so frames are reported as 16-bit rather
+than the sensor's 12, which is what stops a linear display clipping to white.
 * **It has not been built against the real vendor header, or run against real
   hardware.** The mock is written from the vendor's published API and is only
   as accurate as that reading. Every symbol it calls does exist in a shipping

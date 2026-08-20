@@ -6,6 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `firstlight-svbony`: a backend over SVBONY's own SDK, covering the SV305
+  series, which does not speak the Touptek protocol. The SDK and, on macOS,
+  libusb are fetched or built by the build script against pinned hashes, so
+  there is nothing to install by hand. Verified against a real SV305C Pro.
+- Backends can explain why they see nothing (`Backend::unavailable_reason`),
+  which the GUI and CLI both surface.
+
+### Fixed
+
+- Sliders stuttered while dragging, because a status snapshot carrying the
+  camera's older value could arrive mid-drag and overwrite the slider.
+- The Touptek backend was documented as covering the SVBONY SV305C Pro. It
+  does not; that camera uses SVBONY's own SDK.
+- `firstlight-cli info` printed the enumeration record rather than the opened
+  camera's, showing a 0x0 sensor with no bit depths.
+- Vendor SDK libraries had no rpath recorded in the binaries, so a build with
+  a hardware backend aborted at startup.
+
 ## [0.1.0] — 2026-08-19
 
 First working version. Nothing here has been run against a real camera yet;
