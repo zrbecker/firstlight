@@ -408,6 +408,12 @@ fn apply(camera: &mut dyn Camera, settings: &Settings) -> Result<()> {
     // Report what the camera actually settled on, which is not always what
     // was asked for: ranges get clamped and ROIs get rounded.
     let exposure = camera.exposure_us().unwrap_or(0);
+    // White balance is read back too: on some cameras a write applies to the
+    // pixels while the read still reports something else, and that is worth
+    // seeing rather than guessing at.
+    if let Ok(wb) = camera.white_balance() {
+        println!("White balance reads back as R={} G={} B={}", wb.red, wb.green, wb.blue);
+    }
     println!(
         "Settings: exposure {}, gain {}, offset {}, ROI {}, bin {}, {}",
         report::format_exposure(exposure),
