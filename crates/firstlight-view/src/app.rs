@@ -105,7 +105,7 @@ pub struct FirstLightApp {
     pub status: WorkerStatus,
     pub log: VecDeque<LogLine>,
 
-    renderer: Renderer,
+    pub renderer: Renderer,
     /// Width of the image panel at the last repaint, so no more pixels are
     /// rendered than can actually be shown.
     pub viewport_width: f32,
@@ -273,7 +273,30 @@ impl FirstLightApp {
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.drain_updates();
         self.flush_pending_controls();
+        self.check_renderer();
         self.update_texture(ctx);
+    }
+
+    /// Notice a renderer that has stopped, say so, and start another.
+    ///
+    /// Without this a dead render thread leaves the last image on screen
+    /// indefinitely: the picture looks live, the display controls stop having
+    /// any effect, and only restarting the application clears it.
+    fn check_renderer(&mut self) {
+        if let Some(fault) = self.renderer.take_fault() {
+            self.push_log(
+                LogKind::Error,
+                format!("the display renderer failed on a frame: {fault}"),
+            );
+        }
+        if self.renderer.is_alive() {
+            return;
+        }
+        self.push_log(
+            LogKind::Error,
+            "the display renderer stopped; restarting it",
+        );
+        self.renderer = Renderer::spawn(self.worker.frame_ring(), self.display);
     }
 
     fn drain_updates(&mut self) {

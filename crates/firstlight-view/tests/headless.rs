@@ -505,3 +505,107 @@ fn resetting_everything_leaves_read_only_controls_alone() {
         "reset-all tried to write a read-only control: {complaints:?}"
     );
 }
+
+#[test]
+fn the_preview_white_balance_keeps_responding_while_settings_change() {
+    // Reported: after toggling the preview balance while adjusting exposure
+    // and gain, the toggle stopped having any effect until the app was
+    // restarted — which points at the renderer thread rather than the toggle.
+    let mut harness = Harness::new();
+    harness.connect();
+    harness.run_until("the control table", |app| !app.controls.is_empty());
+
+    // Give the camera a strong cast, so "is the correction applied" is
+    // visible in the levels regardless of what the scene looks like.
+    harness.app.send(WorkerCommand::SetControl {
+        id: firstlight_core::ControlId::WbRed,
+        value: 300,
+    });
+    harness.app.send(WorkerCommand::SetControl {
+        id: firstlight_core::ControlId::WbBlue,
+        value: 40,
+    });
+    harness.app.send(WorkerCommand::StartStream);
+    harness.run_until("a frame on screen", |app| app.texture.is_some());
+
+    let mut exposure = 4_000i64;
+    for round in 0..12 {
+        // Toggle, and change exposure and gain the way a user fiddling with
+        // the sliders would.
+        harness.app.white_balance_preview = round % 2 == 0;
+        exposure = if exposure > 20_000 {
+            4_000
+        } else {
+            exposure + 3_000
+        };
+        harness.app.send(WorkerCommand::SetControl {
+            id: firstlight_core::ControlId::ExposureUs,
+            value: exposure,
+        });
+        harness.app.send(WorkerCommand::SetControl {
+            id: firstlight_core::ControlId::Gain,
+            value: 100 + (round as i64 % 5) * 40,
+        });
+
+        // Let the renderer catch up with the new setting.
+        let wanted = harness.app.white_balance_preview;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut matched = false;
+        while Instant::now() < deadline {
+            harness.frame();
+            let levels = harness.app.last_channel_levels;
+            let per_channel = levels[0] != levels[1] || levels[1] != levels[2];
+            if per_channel == wanted {
+                matched = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            matched,
+            "round {round}: preview balance {} but channel levels are {:?}",
+            if wanted { "on" } else { "off" },
+            harness.app.last_channel_levels
+        );
+    }
+}
+
+#[test]
+fn a_stopped_renderer_is_noticed_reported_and_replaced() {
+    // The failure this guards: when the render thread stops, the last image
+    // stays on screen looking live, the display controls quietly stop having
+    // any effect, and only restarting the application clears it.
+    let mut harness = Harness::new();
+    harness.connect();
+    harness.app.send(WorkerCommand::StartStream);
+    harness.run_until("a frame on screen", |app| app.texture.is_some());
+
+    // Stop the renderer the way a panic would: the handle's Drop joins it.
+    let ring = harness.app.worker.frame_ring();
+    let options = harness.app.display;
+    harness.app.renderer = firstlight_view::render::Renderer::spawn(ring, options);
+    // Replacing it is the recovery path; prove the app also *notices* one
+    // that has gone, by handing it a renderer that is already stopped.
+    harness.app.renderer.stop_for_test();
+    assert!(!harness.app.renderer.is_alive());
+
+    let before = harness.app.log.len();
+    harness.run_until("the renderer to be restarted", |app| {
+        app.renderer.is_alive()
+    });
+
+    let complaint: Vec<&str> = harness
+        .app
+        .log
+        .iter()
+        .skip(before)
+        .map(|line| line.text.as_str())
+        .collect();
+    assert!(
+        complaint.iter().any(|t| t.contains("renderer stopped")),
+        "the restart should be reported, log said {complaint:?}"
+    );
+
+    // And it works again afterwards.
+    harness.run_until("frames again", |app| app.texture.is_some());
+}
