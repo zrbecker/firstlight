@@ -43,6 +43,10 @@ use crate::controls;
 /// flag and queued control writes responsive during long exposures.
 const READ_SLICE_MS: i32 = 100;
 
+/// How long to keep trying to open a camera that was recently closed.
+const OPEN_RETRY_WINDOW: Duration = Duration::from_secs(5);
+const OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
 /// Pause after stopping video before anything else touches the camera.
 const RESTART_SETTLE: Duration = Duration::from_millis(150);
 
@@ -522,7 +526,7 @@ impl Camera for SvbonyCamera {
         if self.connected {
             return Ok(());
         }
-        self.shared.device().open()?;
+        self.open_with_retry()?;
         self.shared.lost.store(false, Ordering::SeqCst);
         self.connected = true;
 
@@ -819,6 +823,35 @@ impl Camera for SvbonyCamera {
 }
 
 impl SvbonyCamera {
+    /// Open the camera, re-enumerating if the SDK says the id is unknown.
+    ///
+    /// Measured on an SV305C Pro: for about a second after the camera has
+    /// been closed, opening it either blocks or fails with "no camera with
+    /// that id" — and the id really has gone stale, so retrying the same one
+    /// never succeeds. Re-enumerating picks up the current id and the open
+    /// then works. Without this, disconnecting and reconnecting in the GUI,
+    /// or reconnecting after an unplug, fails on a camera that is sitting
+    /// there working.
+    fn open_with_retry(&mut self) -> Result<()> {
+        let deadline = Instant::now() + OPEN_RETRY_WINDOW;
+        loop {
+            let result = self.shared.device().open();
+            let Err(error) = result else {
+                return Ok(());
+            };
+            if Instant::now() >= deadline {
+                return Err(error);
+            }
+            thread::sleep(OPEN_RETRY_INTERVAL);
+            if let Some(handle) = sys::enumerate_handles()
+                .into_iter()
+                .find(|handle| handle.camera_id_matches(&self.info.id))
+            {
+                self.shared.device().set_id(handle.device_id);
+            }
+        }
+    }
+
     /// These cameras keep white-balance gains in non-volatile memory and the
     /// SDK applies them to the raw frames, so a setting left behind by
     /// another application shows up as a colour cast in recordings made here.
