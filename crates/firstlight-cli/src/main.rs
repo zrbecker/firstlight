@@ -123,11 +123,15 @@ fn choose(registry: &Registry, select: &Select) -> Result<CameraInfo> {
             .find(|c| c.id.as_str() == wanted || c.serial == *wanted)
             .ok_or_else(|| Error::NotFound(format!("camera {wanted:?}"))),
         None => cameras.into_iter().next().ok_or_else(|| {
-            Error::NotFound(
-                "no cameras attached (run `firstlight-cli list`; a build without \
-                 --features touptek only sees the simulator)"
-                    .into(),
-            )
+            // The reason may be that nothing is plugged in, or that this
+            // build has no backend for what is; `list` prints both.
+            let mut message = String::from("no cameras attached");
+            for note in registry.notes() {
+                message.push_str("\n  note: ");
+                message.push_str(&note);
+            }
+            message.push_str("\n  run `firstlight-cli list` to see what this build can see");
+            Error::NotFound(message)
         }),
     }
 }
