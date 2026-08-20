@@ -280,8 +280,11 @@ fn controls_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
             }
 
             ui.add_enabled_ui(enabled && !control.read_only, |ui| {
-                // Leave room for the button; the slider takes what is left.
-                ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(60.0);
+                // Deliberately not sized from `available_width()`: inside a
+                // horizontal layout, and during egui's sizing pass, that is
+                // far larger than the panel, and the sliders end up laid out
+                // hundreds of pixels wider than the sidebar they live in.
+                // egui's default width fits, and the row grows by the button.
                 let mut slider = egui::Slider::new(&mut value, control.min..=control.max)
                     .logarithmic(control.logarithmic)
                     .clamping(egui::SliderClamping::Always)
@@ -556,8 +559,12 @@ fn image_area(app: &mut FirstLightApp, ui: &mut egui::Ui) {
     ui.add_space(4.0);
 
     // Remembered so the renderer sizes its output to the window rather than
-    // producing pixels nothing can show.
-    app.viewport_width = ui.available_size().x.max(320.0);
+    // producing pixels nothing can show. Ignored when egui is measuring
+    // rather than drawing, where the available width is not a real one.
+    let width = ui.available_size().x;
+    if width.is_finite() && width > 0.0 {
+        app.viewport_width = width.max(320.0);
+    }
 
     let Some(texture) = &app.texture else {
         ui.centered_and_justified(|ui| {

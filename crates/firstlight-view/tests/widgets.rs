@@ -38,6 +38,8 @@ struct Ui {
     ctx: egui::Context,
     app: FirstLightApp,
     painted: Vec<String>,
+    last_shapes: Vec<egui::epaint::ClippedShape>,
+    size: (f32, f32),
 }
 
 impl Ui {
@@ -56,6 +58,8 @@ impl Ui {
             ctx,
             app,
             painted: Vec::new(),
+            last_shapes: Vec::new(),
+            size: (1280.0, 820.0),
         }
     }
 
@@ -63,7 +67,7 @@ impl Ui {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(1280.0, 820.0),
+                egui::vec2(self.size.0, self.size.1),
             )),
             ..Default::default()
         };
@@ -76,6 +80,7 @@ impl Ui {
         });
         output.textures_delta.clear();
         self.painted = painted_text(&output.shapes);
+        self.last_shapes = output.shapes;
     }
 
     fn run_until(&mut self, what: &str, mut done: impl FnMut(&Ui) -> bool) {
@@ -155,4 +160,79 @@ fn a_backend_that_cannot_see_anything_says_so_on_screen() {
     ui.run_until("the backend note to be painted", |ui| {
         ui.shows("--features touptek")
     });
+}
+
+/// How far right anything that starts inside the left panel reaches.
+fn left_panel_extent(shapes: &[egui::epaint::ClippedShape]) -> f32 {
+    let mut extent: f32 = 0.0;
+    for clipped in shapes {
+        let rect = clipped.shape.visual_bounding_rect();
+        if rect.is_finite() && rect.min.x < 300.0 {
+            extent = extent.max(rect.max.x);
+        }
+    }
+    extent
+}
+
+/// True if the live-view texture was drawn.
+fn shows_live_image(shapes: &[egui::epaint::ClippedShape]) -> bool {
+    fn is_ours(id: egui::TextureId) -> bool {
+        // The font atlas is Managed(0); anything else here is our frame.
+        !matches!(id, egui::TextureId::Managed(0))
+    }
+    fn walk(shape: &egui::Shape) -> bool {
+        match shape {
+            // egui paints an unrotated image as a rectangle with a texture
+            // brush, and only a rotated one as a mesh.
+            egui::Shape::Rect(rect) => rect
+                .brush
+                .as_ref()
+                .is_some_and(|brush| is_ours(brush.fill_texture_id)),
+            egui::Shape::Mesh(mesh) => is_ours(mesh.texture_id),
+            egui::Shape::Vec(shapes) => shapes.iter().any(walk),
+            _ => false,
+        }
+    }
+    shapes.iter().any(|clipped| walk(&clipped.shape))
+}
+
+#[test]
+fn the_controls_stay_inside_the_sidebar() {
+    // The regression this exists for: sizing the sliders from
+    // `available_width()` inside a horizontal layout laid them out to x=698
+    // in a panel 340 wide. They spilled across the live view, and the central
+    // panel lost 220px to them.
+    for (width, height) in [(1280.0f32, 820.0f32), (1376.0, 576.0), (1024.0, 640.0)] {
+        let mut ui = Ui::new();
+        ui.size = (width, height);
+        ui.connect();
+        ui.run_until("the control table", |ui| !ui.app.controls.is_empty());
+        ui.frame();
+
+        let extent = left_panel_extent(&ui.last_shapes);
+        assert!(
+            extent < 400.0,
+            "left panel content reaches x={extent:.0} at {width}x{height}; the \
+             panel is 340 wide"
+        );
+        assert!(
+            ui.app.viewport_width > width * 0.4,
+            "the live view got only {:.0}px of a {width}px window",
+            ui.app.viewport_width
+        );
+    }
+}
+
+#[test]
+fn the_live_view_is_actually_drawn() {
+    let mut ui = Ui::new();
+    ui.connect();
+    ui.app.send(WorkerCommand::StartStream);
+    ui.run_until("a frame on screen", |ui| ui.app.texture.is_some());
+    ui.frame();
+    assert!(
+        shows_live_image(&ui.last_shapes),
+        "the live view texture was never painted; painted text was {:#?}",
+        ui.painted
+    );
 }
