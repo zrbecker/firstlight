@@ -9,6 +9,8 @@ repository.workspace = true
 keywords = ["astronomy", "camera", "touptek", "svbony", "bindings"]
 categories = ["hardware-support", "api-bindings", "science"]
 build = "build.rs"
+# Lets the binary crates learn where the SDK is, so they can record an rpath.
+links = "toupcam"
 
 [features]
 default = []

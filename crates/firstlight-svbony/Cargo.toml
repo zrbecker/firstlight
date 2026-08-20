@@ -9,6 +9,9 @@ repository.workspace = true
 keywords = ["astronomy", "camera", "svbony", "sv305", "bindings"]
 categories = ["hardware-support", "api-bindings", "science"]
 build = "build.rs"
+# Lets the binary crates learn where the library was staged, so they can
+# record an rpath; a library build script cannot do that itself.
+links = "svbcamerasdk"
 
 [features]
 default = []

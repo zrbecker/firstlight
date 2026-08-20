@@ -240,19 +240,14 @@ mod sdk {
 
         println!("cargo:rustc-link-search=native={}", dir.display());
         println!("cargo:rustc-link-lib=dylib=SVBCameraSDK");
-        // So the built binary finds the library without DYLD_LIBRARY_PATH.
-        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-        if target_os == "macos" {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
-            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
-            println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
-        } else {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
-            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
-        }
-        // Tell dependent crates where the real library is, so an application
-        // can copy it into its bundle.
-        println!("cargo:svbony_library={}", staged.display());
+
+        // `cargo:rustc-link-arg` from a *library* build script never reaches
+        // the final binary, so the rpath cannot be set here. Publish the
+        // location instead (`links = "svbcamerasdk"` turns these into
+        // DEP_SVBCAMERASDK_* for dependents) and let the binary crates record
+        // the rpath in their own build scripts.
+        println!("cargo:lib_dir={}", dir.display());
+        println!("cargo:library={}", staged.display());
     }
 
     /// The mock camera compiles against the *real* header, so the FFI layer

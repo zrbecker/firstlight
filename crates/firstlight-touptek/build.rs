@@ -165,16 +165,11 @@ mod vendor {
 
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
         println!("cargo:rustc-link-lib=dylib=toupcam");
-        // The dylib ships beside the binary rather than in /usr/local/lib, so
-        // the runtime loader needs to be told where to look.
-        if target_os == "macos" {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
-            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
-            println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
-        } else if target_os == "linux" {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
-            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
-        }
+        // The rpath has to be recorded in the binary, and a library build
+        // script cannot do that: `cargo:rustc-link-arg` applies only to the
+        // package it comes from. Publish the directory (`links = "toupcam"`
+        // exposes it as DEP_TOUPCAM_LIB_DIR) and let the binaries do it.
+        println!("cargo:lib_dir={}", lib_dir.display());
     }
 
     fn has_library(dir: &Path, target_os: &str) -> bool {
