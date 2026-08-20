@@ -678,8 +678,18 @@ impl Camera for SvbonyCamera {
             ));
         }
         // The SDK measures from the current scene and writes the result into
-        // the camera's own gains, where it persists.
+        // the camera's own gains.
         self.shared.device().white_balance_once()?;
+
+        // Measured on an SV305C Pro: after this call the video stream stops
+        // delivering — the SDK evidently takes frames of its own to measure
+        // with, and never gives the pipeline back. Restarting the stream is
+        // the difference between a button that works and one that silently
+        // freezes the live view.
+        if self.streaming {
+            self.stop_streaming()?;
+            self.start_streaming()?;
+        }
         let _ = self.shared.events.send(CameraEvent::Warning {
             message: "white balance measured from the current scene and stored \
                       in the camera"
