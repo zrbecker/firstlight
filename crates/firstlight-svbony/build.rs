@@ -99,6 +99,7 @@ mod sdk {
             let lib = obtain(&library());
             link(&lib);
         } else {
+            #[cfg(feature = "mock-sdk")]
             build_mock(&header);
         }
     }
@@ -257,6 +258,7 @@ mod sdk {
     /// The mock camera compiles against the *real* header, so the FFI layer
     /// is checked against the genuine declarations rather than a hand-written
     /// approximation of them.
+    #[cfg(feature = "mock-sdk")]
     fn build_mock(header: &Path) {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mock");
         let source = dir.join("svb_mock.c");
