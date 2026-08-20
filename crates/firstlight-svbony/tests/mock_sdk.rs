@@ -323,21 +323,17 @@ fn dropping_a_streaming_camera_shuts_the_sdk_down_cleanly() {
 }
 
 #[test]
-fn the_sdk_is_told_not_to_write_parameter_files() {
-    // Left on, the SDK writes <model>-AST_Cfg_*.bin into the process's
-    // working directory and reloads it next time a camera is opened there.
-    // Observed on a real SV305C Pro: the same camera reported different gain,
-    // offset and white balance depending on which directory the program ran
-    // from, and dropped .bin files into a git working tree. The camera's own
-    // state should be the only state.
+fn the_sdk_keeps_its_parameter_saving() {
+    // Left on deliberately. It is the only thing that remembers exposure,
+    // gain and white balance between sessions: the camera powers up at about
+    // 1 ms exposure with a factory white balance every time. Turning it off
+    // silently cost the user every setting on every launch, so if anyone is
+    // tempted again, this test is the argument.
     let (_guard, backend) = setup();
-    assert!(
-        mock::auto_save_enabled(),
-        "the SDK default is on, or this test proves nothing"
-    );
+    assert!(mock::auto_save_enabled(), "the SDK default is on");
     let _camera = open(&backend);
     assert!(
-        !mock::auto_save_enabled(),
-        "connect should have turned it off"
+        mock::auto_save_enabled(),
+        "connect should leave the SDK's parameter saving alone"
     );
 }

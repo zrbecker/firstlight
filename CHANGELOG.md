@@ -14,6 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   there is nothing to install by hand. Verified against a real SV305C Pro.
 - Backends can explain why they see nothing (`Backend::unavailable_reason`),
   which the GUI and CLI both surface.
+- Automatic white balance measures the picture and corrects the camera's own
+  gains, so captures come out balanced too. SVBONY's own "white balance once"
+  call is not used: it writes the same fixed triple whatever the camera is
+  pointed at.
+
+### Notes
+
+- The SVBONY SDK remembers exposure, gain and white balance in a file in the
+  working directory, and the camera itself remembers nothing — it powers up at
+  about 1 ms exposure with a factory white balance. That mechanism is left
+  enabled, warts and all, because it is the only persistence there is. The
+  files it writes are gitignored.
 
 ### Fixed
 
