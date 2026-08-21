@@ -131,6 +131,11 @@ pub struct FirstLightApp {
     /// Set while waiting for the user to confirm the camera is covered.
     pub confirming_darks: bool,
     /// How many frames a dark is averaged from.
+    ///
+    /// Sixty-four rather than a handful because the master's own noise is
+    /// subtracted into every frame along with the pattern: too shallow a
+    /// dark adds back what it takes away, which reads as the feature doing
+    /// nothing. See [`crate::ui`] for the measurement.
     pub dark_frames: usize,
     /// How many frames the live view averages. One is off.
     pub stack_depth: usize,
@@ -196,7 +201,7 @@ impl FirstLightApp {
             subtract_dark: true,
             taking_darks: false,
             confirming_darks: false,
-            dark_frames: 16,
+            dark_frames: 64,
             stack_depth: 1,
             stacked_frames: 1,
             stacked_span: Duration::ZERO,

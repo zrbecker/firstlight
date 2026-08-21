@@ -45,6 +45,14 @@ pub struct MasterDark {
     /// How many frames were averaged. More is better: the master carries its
     /// own noise, reduced by the square root of this.
     pub frames: usize,
+    /// Fraction of the samples that came in sitting at zero.
+    ///
+    /// Measured across the input frames rather than the average, because
+    /// averaging hides it: covered frames at offset 0 on an SV305C Pro had
+    /// 59.5% of their samples clipped, and not one sample of the resulting
+    /// master was zero. What is clipped is gone, so the master describes a
+    /// black level the sensor never actually reaches.
+    clipped: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,13 +126,17 @@ impl MasterDark {
         let shape = Shape::of(&first.meta);
         let mut sums = vec![0f64; shape.samples()];
 
+        let mut clipped = 0u64;
         for frame in frames {
             if Shape::of(&frame.meta) != shape {
                 return Err(Error::other(
                     "the frames changed shape while the dark was being taken",
                 ));
             }
-            visit_samples(frame, |index, value| sums[index] += f64::from(value));
+            visit_samples(frame, |index, value| {
+                sums[index] += f64::from(value);
+                clipped += u64::from(value == 0);
+            });
         }
 
         let count = frames.len() as f64;
@@ -142,6 +154,7 @@ impl MasterDark {
             gain: first.meta.gain,
             offset: first.meta.offset,
             frames: frames.len(),
+            clipped: clipped as f32 / (shape.samples() * frames.len()).max(1) as f32,
         })
     }
 
@@ -189,24 +202,41 @@ impl MasterDark {
         None
     }
 
-    /// Whether this looks like it was actually taken in the dark.
+    /// Everything wrong with this master that is worth saying out loud.
     ///
-    /// A covered sensor is uniform; anything pointed at a scene has bright
-    /// parts. This compares the brightest of the frame against its typical
-    /// level, and returns a complaint when the gap is large enough that
-    /// something was almost certainly in view. A warning rather than a
-    /// refusal — an unusual setup should not be blocked by a heuristic.
-    pub fn looks_covered(&self, full_scale: u16) -> Option<String> {
-        let bright = percentile(&self.samples, 99.9);
+    /// All of these are warnings rather than refusals: each is a heuristic,
+    /// and an unusual setup should not be blocked by one. Returned together
+    /// so a caller reports the lot instead of only the first thing noticed.
+    pub fn complaints(&self, full_scale: u16) -> Vec<String> {
         let scale = f32::from(full_scale.max(1));
-        let spread = (bright - self.pedestal) / scale;
-        (spread > 0.10).then(|| {
-            format!(
+        let mut out = Vec::new();
+
+        // A covered sensor is uniform; anything pointed at a scene has bright
+        // parts. A large gap between the brightest samples and the typical
+        // level means something was almost certainly in view.
+        let spread = (percentile(&self.samples, 99.9) - self.pedestal) / scale;
+        if spread > 0.10 {
+            out.push(format!(
                 "this does not look like a dark frame: the brightest parts sit \
                  {:.0}% of full scale above the rest. Is the camera covered?",
                 spread * 100.0
-            )
-        })
+            ));
+        }
+
+        // Clipping at the black end is not noise, it is missing data: those
+        // pixels were darker than zero and the camera had nowhere to put
+        // them. Subtracting a master built from them removes a pattern the
+        // sensor has, but leaves behind the part that was cut off.
+        if self.clipped > 0.02 {
+            out.push(format!(
+                "{:.0}% of this dark arrived clipped at zero — raise the offset \
+                 until the black level clears the floor, or neither the dark \
+                 nor the frames it corrects can be trusted at the bottom end",
+                self.clipped * 100.0
+            ));
+        }
+
+        out
     }
 
     /// Subtract the dark from a frame.
@@ -464,20 +494,70 @@ mod tests {
     }
 
     #[test]
+    fn a_dark_that_arrived_clipped_says_so() {
+        // Offset 0 on an SV305C Pro at gain 450: 59.5% of samples came back
+        // at zero, and averaging them left a master with no zero samples at
+        // all. So the count has to come from the frames, not the average.
+        let clipped =
+            MasterDark::from_frames(&[floored_frame(0.6, 0), floored_frame(0.6, 1)]).unwrap();
+        assert!(
+            !clipped.samples.iter().any(|&s| s <= 0.0),
+            "the average hides it, which is the whole reason for counting on the way in"
+        );
+        let complaints = clipped.complaints(65535);
+        assert!(
+            complaints.iter().any(|c| c.contains("clipped")),
+            "{complaints:?}"
+        );
+
+        // A dark sitting clear of the floor has nothing to complain about.
+        let fine = MasterDark::from_frames(&[floored_frame(0.0, 0)]).unwrap();
+        assert_eq!(fine.complaints(65535), Vec::<String>::new());
+    }
+
+    /// A covered frame where `floor_fraction` of the samples hit zero.
+    ///
+    /// `parity` picks which half of them clip, so two frames can floor the
+    /// same proportion of pixels without flooring the *same* pixels — which
+    /// is how a real sensor behaves, and why the average comes out clean.
+    fn floored_frame(floor_fraction: f64, parity: usize) -> Frame {
+        let (width, height) = (64u32, 64u32);
+        let mut meta = meta(width, height, BitDepth::SIXTEEN);
+        meta.roi = Roi::full(width, height);
+        let total = (width * height) as usize;
+        let floored = (total as f64 * floor_fraction) as usize;
+        let mut data = Vec::with_capacity(total * 2);
+        for index in 0..total {
+            // Alternating either side of the pedestal, so the average of two
+            // such frames lands above zero even where one of them clipped.
+            let value: u16 = if index < floored {
+                if index % 2 == parity { 0 } else { 400 }
+            } else {
+                3_200
+            };
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        Frame::new(meta, data).unwrap()
+    }
+
+    #[test]
     fn an_uncovered_camera_is_noticed() {
         // Flat and dim: what a covered sensor looks like.
         let covered = MasterDark::from_frames(&[big_frame(0.0)]).unwrap();
-        assert_eq!(covered.looks_covered(65535), None);
+        assert_eq!(covered.complaints(65535), Vec::<String>::new());
 
         // A fifth of the frame bright: something was plainly in view.
         let uncovered = MasterDark::from_frames(&[big_frame(0.2)]).unwrap();
-        let complaint = uncovered.looks_covered(65535).expect("should complain");
-        assert!(complaint.contains("covered"), "{complaint}");
+        let complaints = uncovered.complaints(65535);
+        assert!(
+            complaints.iter().any(|c| c.contains("covered")),
+            "{complaints:?}"
+        );
 
         // A scattering of hot pixels is not a scene, and must not be
         // mistaken for one — that is exactly what a dark is meant to capture.
         let hot = MasterDark::from_frames(&[big_frame(0.0005)]).unwrap();
-        assert_eq!(hot.looks_covered(65535), None);
+        assert_eq!(hot.complaints(65535), Vec::<String>::new());
     }
 
     #[test]

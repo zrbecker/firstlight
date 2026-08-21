@@ -849,7 +849,7 @@ impl Worker {
     fn finish_dark(&mut self, dark: Option<MasterDark>) {
         self.dark = None;
         if let Some(dark) = dark {
-            if let Some(complaint) = dark.looks_covered(u16::MAX) {
+            for complaint in dark.complaints(u16::MAX) {
                 let _ = self.updates.send(WorkerUpdate::Event(CameraEvent::Warning {
                     message: complaint,
                 }));

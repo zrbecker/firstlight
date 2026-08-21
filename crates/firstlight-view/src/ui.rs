@@ -581,6 +581,20 @@ fn dark_controls(app: &mut FirstLightApp, ui: &mut egui::Ui) {
                     .small()
                     .color(Color32::WHITE),
                 );
+                ui.label(
+                    RichText::new(if app.dark_frames < app.stack_depth {
+                        format!(
+                            "{} frames, which is shallower than the {}-deep \
+                             stack. Raise it to at least {} or the dark will \
+                             add about as much speckle as it removes.",
+                            app.dark_frames, app.stack_depth, app.stack_depth
+                        )
+                    } else {
+                        format!("Averaging {} frames.", app.dark_frames)
+                    })
+                    .small()
+                    .color(Color32::WHITE),
+                );
                 ui.horizontal(|ui| {
                     if ui.button("Take darks").clicked() {
                         app.take_darks();
@@ -622,11 +636,16 @@ fn dark_controls(app: &mut FirstLightApp, ui: &mut egui::Ui) {
             }
             ui.add(
                 egui::DragValue::new(&mut app.dark_frames)
-                    .range(1..=128)
+                    .range(1..=256)
                     .speed(1.0)
                     .suffix(" frames"),
             )
-            .on_hover_text("More frames make a smoother dark, which adds less noise back.");
+            .on_hover_text(
+                "A master dark carries its own noise, and subtracting it adds \
+                 that noise to every frame. Averaging more frames makes it \
+                 smoother. It needs to be at least as deep as the live stack, \
+                 or it puts back more speckle than it takes away.",
+            );
         }
         Some(summary) => {
             ui.checkbox(&mut app.subtract_dark, "Subtract dark");
@@ -639,6 +658,26 @@ fn dark_controls(app: &mut FirstLightApp, ui: &mut egui::Ui) {
     }
     if clear {
         app.clear_dark();
+    }
+
+    // Too shallow a dark is the failure that looks like the feature not
+    // working: its own noise swamps the pattern it removes, so the picture
+    // barely changes. Measured on an SV305C Pro at gain 450 under a 64-deep
+    // stack, a 16-frame dark left 394 hot pixels and a 64-frame dark left
+    // 102, against 1486 for no dark at all.
+    if let Some(dark) = &app.dark
+        && app.subtract_dark
+        && dark.frames < app.stack_depth
+    {
+        ui.label(
+            RichText::new(format!(
+                "the dark is {} frames deep and the stack is {} — take a \
+                 deeper dark or the noise it adds cancels out what it removes",
+                dark.frames, app.stack_depth
+            ))
+            .small()
+            .color(Color32::from_rgb(230, 180, 80)),
+        );
     }
 
     // A dark only applies to the settings it was taken at, and silently
