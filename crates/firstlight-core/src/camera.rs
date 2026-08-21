@@ -205,9 +205,6 @@ pub trait Camera: Send {
     fn auto_white_balance(&mut self) -> Result<()> {
         const PASSES: u32 = 3;
         const TOLERANCE: f64 = 0.02;
-        /// Frames discarded after a change, so the measurement reflects the
-        /// new gains rather than one already in flight.
-        const DISCARD: u32 = 3;
         const TIMEOUT: Duration = Duration::from_secs(5);
 
         let controls = self.controls()?;
@@ -228,10 +225,9 @@ pub trait Camera: Send {
 
         let outcome = (|| -> Result<()> {
             for _ in 0..PASSES {
-                let mut frame = self.next_frame(TIMEOUT)?;
-                for _ in 0..DISCARD {
-                    frame = self.next_frame(TIMEOUT)?;
-                }
+                // Measure a frame that was actually exposed under the gains
+                // just written, rather than one still in flight from before.
+                let frame = self.next_settled_frame(TIMEOUT)?;
                 let means = frame.channel_means().ok_or_else(|| {
                     Error::Unsupported("a mono camera has nothing to balance".into())
                 })?;
@@ -333,6 +329,24 @@ pub trait Camera: Send {
             .ok_or_else(|| Error::UnknownControl(id.to_string()))
     }
 
+    /// Wait for a frame that was exposed under the current settings.
+    ///
+    /// A frame already integrating when a setting changed finishes under the
+    /// old value, so anything that measures or saves a frame wants this
+    /// rather than [`Camera::next_frame`]. The live view deliberately does
+    /// not: a briefly stale picture is better than a frozen one.
+    ///
+    /// `timeout` applies to each wait, so the total is bounded by roughly one
+    /// exposure beyond it.
+    fn next_settled_frame(&mut self, timeout: Duration) -> Result<Frame> {
+        loop {
+            let frame = self.next_frame(timeout)?;
+            if frame.meta.settings_settled {
+                return Ok(frame);
+            }
+        }
+    }
+
     /// Grab a single frame: start the stream if needed, wait, stop again.
     ///
     /// The deadline covers the whole operation, so a caller asking for one
@@ -342,7 +356,9 @@ pub trait Camera: Send {
         if !was_streaming {
             self.start_streaming()?;
         }
-        let result = self.next_frame(timeout);
+        // Settled, because a snapshot gets written to a file and a file
+        // that misdescribes itself outlives the session that made it.
+        let result = self.next_settled_frame(timeout);
         if !was_streaming {
             // Stop even when the grab failed; leaving the sensor running after
             // a failed snap is how you end up with a device you cannot reopen.

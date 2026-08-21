@@ -997,6 +997,12 @@ impl Worker {
         let Some(recording) = self.recording.as_mut() else {
             return;
         };
+        // A frame that was already integrating when a setting changed carries
+        // the old value while being labelled with the new one. Never write
+        // that to a file.
+        if !frame.meta.settings_settled {
+            return;
+        }
 
         // A frame arriving inside the gap the user asked for is discarded
         // rather than written; it still reaches the live view.
@@ -1030,6 +1036,10 @@ impl Worker {
     }
 
     fn snap_frame(&mut self, frame: &Frame) {
+        if self.pending_snap.is_some() && !frame.meta.settings_settled {
+            // Wait for one that describes itself; the request stays pending.
+            return;
+        }
         let Some(path) = self.pending_snap.take() else {
             return;
         };

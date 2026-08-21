@@ -26,7 +26,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
@@ -36,6 +36,7 @@ use firstlight_core::error::{Error, Result};
 use firstlight_core::event::CameraEvent;
 use firstlight_core::frame::{Frame, FrameMeta, PixelFormat};
 use firstlight_core::ring::{FrameRing, StreamStop};
+use firstlight_core::settle::SettingsClock;
 
 use super::ffi;
 use super::sys::{self, Handle};
@@ -62,6 +63,9 @@ struct Geometry {
 /// State shared between the camera, the SDK callback and the pump thread.
 struct Shared {
     handle: Mutex<Handle>,
+    /// When the camera's configuration last changed, so frames already
+    /// integrating are marked as not describing themselves.
+    clock: SettingsClock,
     ring: Arc<FrameRing>,
     /// Event codes, straight from the vendor callback. Unbounded on purpose:
     /// the callback must never block or fail.
@@ -143,6 +147,7 @@ impl TouptekCamera {
             info,
             shared: Arc::new(Shared {
                 handle: Mutex::new(Handle::null()),
+                clock: SettingsClock::new(),
                 ring: Arc::new(FrameRing::new(3)),
                 sdk_events: sdk_tx,
                 camera_events: event_tx,
@@ -175,7 +180,10 @@ impl TouptekCamera {
 
     /// Read the geometry back from the SDK rather than trusting what we asked
     /// for: cameras round ROIs, and binning changes the reported size.
+    /// Re-read geometry from the camera. Always follows a change, so it is
+    /// also where frames still in flight are marked as stale.
     fn refresh_geometry(&mut self) -> Result<()> {
+        self.shared.clock.changed();
         let handle = self.shared.handle();
         let (width, height) = handle.size()?;
         let (x, y, roi_w, roi_h) = handle.roi().unwrap_or((0, 0, width, height));
@@ -316,6 +324,10 @@ impl TouptekCamera {
 /// Pull frames until told to stop or the device dies.
 fn pump(shared: Arc<Shared>, sdk_events: Receiver<u32>, capacity: usize) {
     let mut buffer = vec![0u8; capacity];
+    // When the frame now being pulled began integrating. A free-running
+    // sensor starts the next exposure as it hands the last one over, so the
+    // previous arrival is a safe lower bound.
+    let mut exposure_began = Instant::now();
 
     loop {
         if shared.stop.load(Ordering::SeqCst) {
@@ -387,7 +399,12 @@ fn pump(shared: Arc<Shared>, sdk_events: Receiver<u32>, capacity: usize) {
                     roi: geometry.roi,
                     dropped: shared.ring.dropped(),
                     temperature_c: None,
+                    // This frame began integrating one exposure ago; if
+                    // anything changed since, its pixels predate the metadata.
+                    settings_settled: shared.clock.settled_since(exposure_began),
                 };
+                // The next exposure begins as this one is handed over.
+                exposure_began = Instant::now();
                 match Frame::new(meta, &buffer[..expected]) {
                     Ok(frame) => {
                         let before = shared.ring.dropped();
@@ -548,6 +565,7 @@ impl Camera for TouptekCamera {
             other => return Err(Error::UnknownControl(other.to_string())),
         }
         drop(handle);
+        self.shared.clock.changed();
 
         // Keep the metadata stamped onto frames in step with reality.
         let mut geometry = self
@@ -658,7 +676,9 @@ impl Camera for TouptekCamera {
             tuning::wb_percent_to_gain(wb.red),
             tuning::wb_percent_to_gain(wb.green),
             tuning::wb_percent_to_gain(wb.blue),
-        ])
+        ])?;
+        self.shared.clock.changed();
+        Ok(())
     }
 
     fn is_streaming(&self) -> bool {

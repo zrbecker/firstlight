@@ -23,6 +23,7 @@ fn bayer_frame(pattern: BayerPattern, red: u8, green: u8, blue: u8) -> Frame {
         roi: Roi::full(w, h),
         dropped: 0,
         temperature_c: None,
+        settings_settled: true,
     };
     let mut data = vec![0u8; (w * h) as usize];
     for y in 0..h {
@@ -205,6 +206,7 @@ fn cast_frame() -> Frame {
         roi: Roi::full(w, h),
         dropped: 0,
         temperature_c: None,
+        settings_settled: true,
     };
     let mut data = vec![0u8; (w * h) as usize * 2];
     for y in 0..h {
@@ -349,6 +351,7 @@ fn cast_frame_with_highlight(bright_fraction: f64) -> Frame {
         roi: Roi::full(w, h),
         dropped: 0,
         temperature_c: None,
+        settings_settled: true,
     };
     let bright_rows = (f64::from(h) * bright_fraction) as u32;
     let mut data = vec![0u8; (w * h) as usize * 2];

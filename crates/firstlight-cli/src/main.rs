@@ -246,6 +246,11 @@ fn capture(select: &Select, settings: &Settings, options: CaptureOptions) -> Res
 
         match camera.next_frame(settings.timeout) {
             Ok(frame) => {
+                // A frame that was already integrating when a setting changed
+                // carries the old value while being labelled with the new one.
+                if !frame.meta.settings_settled {
+                    continue;
+                }
                 let exposure = Duration::from_micros(frame.meta.exposure_us);
                 if !options.delay.is_zero() {
                     let now = Instant::now();
@@ -323,7 +328,7 @@ fn snap(
             if interrupted.load(Ordering::SeqCst) {
                 break;
             }
-            let frame = camera.next_frame(settings.timeout)?;
+            let frame = camera.next_settled_frame(settings.timeout)?;
             let path = numbered_path(&output, index, count);
             write_fits(&path, &frame, &meta)?;
             saved += 1;

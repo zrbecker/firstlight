@@ -24,6 +24,7 @@ fn frame(sequence: u64) -> Frame {
         roi: Roi::full(2, 2),
         dropped: 0,
         temperature_c: None,
+        settings_settled: true,
     };
     Frame::new(meta, vec![0u8; 4]).expect("frame geometry")
 }

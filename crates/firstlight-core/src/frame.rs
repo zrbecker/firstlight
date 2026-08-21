@@ -159,6 +159,15 @@ pub struct FrameMeta {
     /// in time, since the stream started.
     pub dropped: u64,
     pub temperature_c: Option<f32>,
+    /// Whether this frame was exposed entirely under the settings recorded
+    /// above.
+    ///
+    /// False when the frame was already integrating as a setting changed, so
+    /// its pixels predate the exposure, gain, offset or geometry it is
+    /// labelled with. The live view shows such frames anyway; anything that
+    /// writes a file skips them, because a file that misdescribes itself is
+    /// worse than one that does not exist. See [`crate::settle`].
+    pub settings_settled: bool,
 }
 
 impl FrameMeta {

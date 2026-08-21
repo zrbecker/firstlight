@@ -34,6 +34,7 @@ use firstlight_core::error::{Error, Result};
 use firstlight_core::event::CameraEvent;
 use firstlight_core::frame::{Frame, FrameMeta, PixelFormat};
 use firstlight_core::ring::{FrameRing, StreamStop};
+use firstlight_core::settle::SettingsClock;
 
 use super::ffi;
 use super::sys::{self, Device};
@@ -88,6 +89,9 @@ impl Geometry {
 
 struct Shared {
     device: Mutex<Device>,
+    /// When the camera's configuration last changed, so frames already
+    /// integrating are marked as not describing themselves.
+    clock: SettingsClock,
     ring: Arc<FrameRing>,
     events: Sender<CameraEvent>,
     geometry: Mutex<Geometry>,
@@ -144,6 +148,7 @@ impl SvbonyCamera {
             info,
             shared: Arc::new(Shared {
                 device: Mutex::new(Device::new(device_id)),
+                clock: SettingsClock::new(),
                 ring: Arc::new(FrameRing::new(3)),
                 events: events_tx,
                 geometry: Mutex::new(geometry),
@@ -282,7 +287,10 @@ impl SvbonyCamera {
 
     /// Re-read geometry from the camera rather than trusting what we asked
     /// for: ROIs get rounded and binning rescales everything.
+    /// Re-read geometry from the camera. Always follows a change, so it is
+    /// also where frames still in flight are marked as stale.
     fn refresh_geometry(&mut self) -> Result<()> {
+        self.shared.clock.changed();
         let device = self.shared.device();
         let (x, y, width, height, bin) = device.roi()?;
         let image_type = device.image_type()?;
@@ -381,6 +389,11 @@ fn pump(shared: Arc<Shared>, capacity: usize) {
     let mut buffer = vec![0u8; capacity];
     let mut since_drop_check = 0u32;
     let mut last_delivery = Instant::now();
+    // When the frame now being read began integrating. A free-running sensor
+    // starts the next exposure as it hands the last one over, so the previous
+    // arrival is a safe lower bound — and erring early is the right way to
+    // err, since the cost is one discarded frame rather than a wrong file.
+    let mut exposure_began = Instant::now();
     let mut kicks = 0u32;
 
     loop {
@@ -457,7 +470,12 @@ fn pump(shared: Arc<Shared>, capacity: usize) {
                     roi: geometry.roi,
                     dropped: shared.ring.dropped(),
                     temperature_c: None,
+                    // This frame began integrating one exposure ago; if
+                    // anything changed since, its pixels predate the metadata.
+                    settings_settled: shared.clock.settled_since(exposure_began),
                 };
+                // The next exposure begins as this one is handed over.
+                exposure_began = Instant::now();
                 match Frame::new(meta, &buffer[..expected]) {
                     Ok(frame) => {
                         let before = shared.ring.dropped();
@@ -586,6 +604,7 @@ impl Camera for SvbonyCamera {
             _ => value,
         };
         self.shared.device().set_control(control_type, raw, false)?;
+        self.shared.clock.changed();
 
         let mut geometry = self
             .shared
@@ -613,7 +632,9 @@ impl Camera for SvbonyCamera {
         let control_type =
             controls::to_control_type(id).ok_or_else(|| Error::UnknownControl(id.to_string()))?;
         let value = self.shared.device().control(control_type)?;
-        self.shared.device().set_control(control_type, value, on)
+        self.shared.device().set_control(control_type, value, on)?;
+        self.shared.clock.changed();
+        Ok(())
     }
 
     fn roi(&self) -> Result<Roi> {

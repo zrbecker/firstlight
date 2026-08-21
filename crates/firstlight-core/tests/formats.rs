@@ -32,6 +32,7 @@ fn frame(width: u32, height: u32, depth: BitDepth, format: PixelFormat, fill: u1
         roi: Roi::new(4, 8, width, height),
         dropped: 0,
         temperature_c: Some(-10.5),
+        settings_settled: true,
     };
     let samples = (width * height) as usize * format.samples_per_pixel();
     let data = if depth.bytes_per_sample() == 1 {
@@ -231,6 +232,7 @@ fn fits_writes_rgb_as_separate_planes() {
         roi: Roi::full(2, 1),
         dropped: 0,
         temperature_c: None,
+        settings_settled: true,
     };
     // Interleaved input: (10,20,30), (40,50,60).
     let frame = Frame::new(meta, vec![10, 20, 30, 40, 50, 60]).unwrap();

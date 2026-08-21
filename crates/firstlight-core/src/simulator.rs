@@ -22,6 +22,7 @@ use crate::error::{Error, Result};
 use crate::event::CameraEvent;
 use crate::frame::{BayerPattern, Frame, FrameMeta, PixelFormat};
 use crate::ring::{FrameRing, StreamStop};
+use crate::settle::SettingsClock;
 
 pub const BACKEND_NAME: &str = "simulator";
 
@@ -286,6 +287,9 @@ pub struct SimulatorCamera {
     streaming: bool,
     values: BTreeMap<ControlId, i64>,
     settings: Arc<Mutex<SimSettings>>,
+    /// When the settings last changed, so frames already in flight are marked
+    /// as not describing themselves.
+    clock: Arc<SettingsClock>,
     ring: Arc<FrameRing>,
     stop_flag: Arc<AtomicBool>,
     producer: Option<JoinHandle<()>>,
@@ -331,6 +335,7 @@ impl SimulatorCamera {
             streaming: false,
             values,
             settings: Arc::new(Mutex::new(settings)),
+            clock: Arc::new(SettingsClock::new()),
             ring: Arc::new(FrameRing::new(3)),
             stop_flag: Arc::new(AtomicBool::new(false)),
             producer: None,
@@ -352,6 +357,10 @@ impl SimulatorCamera {
     fn edit_settings(&self, f: impl FnOnce(&mut SimSettings)) {
         let mut guard = self.settings.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard);
+        drop(guard);
+        // Every change, whatever it was: a frame already integrating now
+        // carries the old value however it ends up labelled.
+        self.clock.changed();
     }
 
     /// Every entry point checks this first: a call on a dead handle must fail
@@ -405,6 +414,7 @@ impl SimulatorCamera {
         let ring = self.ring.clone();
         let stop_flag = self.stop_flag.clone();
         let settings = self.settings.clone();
+        let clock = self.clock.clone();
         let dev = self.dev.clone();
         let events = self.events_tx.clone();
 
@@ -439,6 +449,9 @@ impl SimulatorCamera {
 
                 let snapshot = settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let interval = snapshot.frame_interval();
+                // Exactly when this frame's exposure begins, which is what
+                // decides whether it describes itself.
+                let began = Instant::now();
 
                 // Sleep in slices so a stop request, an unplug or a stall is
                 // noticed within a tick even during a long exposure.
@@ -480,6 +493,10 @@ impl SimulatorCamera {
                     roi: snapshot.roi,
                     dropped: ring.dropped(),
                     temperature_c: Some(21.5 + (sequence % 7) as f32 * 0.05),
+                    // The snapshot this frame was rendered from was taken
+                    // before the exposure, so a change since then means the
+                    // pixels predate the metadata.
+                    settings_settled: clock.settled_since(began),
                 };
                 match Frame::new(meta, buffer.as_slice()) {
                     Ok(frame) => {

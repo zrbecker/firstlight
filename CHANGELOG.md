@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Frames could be saved with a header that did not describe them. A frame
+  already integrating when a setting changed finishes under the old value,
+  and every frame was stamped with the settings read back afterwards — so a
+  file could say `OFFSET=50` over pixels exposed at 0. Observed on an SV305C
+  Pro, and it cost an evening: it made a working offset control look broken.
+  Frames now carry whether they describe themselves, the live view shows them
+  regardless, and anything that writes a file waits for one that does.
+
 - Control sliders showed each control's default instead of what the camera
   actually held: only exposure, gain and offset were ever read back. A camera
   keeps white balance, gamma and the rest between sessions, so the UI could

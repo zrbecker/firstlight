@@ -3,9 +3,11 @@
 
 use std::time::{Duration, Instant};
 
+use firstlight_core::camera::Camera;
 use firstlight_core::simulator::SimulatorBackend;
 use firstlight_core::{
     Backend, BayerPattern, Binning, BitDepth, CameraId, ControlId, Error, PixelFormat, Roi,
+    WhiteBalance,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -352,4 +354,135 @@ fn automatic_white_balance_is_refused_on_a_mono_camera() {
     let mut camera = backend.open_first().unwrap();
     let error = camera.auto_white_balance().unwrap_err();
     assert!(matches!(error, Error::Unsupported(_)), "got {error:?}");
+}
+
+#[test]
+fn a_frame_in_flight_when_a_setting_changes_is_marked_unsettled() {
+    // The bug this exists for: three frames captured in one run after setting
+    // the offset came back with black levels 0, 3200, 3200 — the first was
+    // still integrating when the offset landed — and all three were labelled
+    // with the new offset. A file that misdescribes itself is worse than one
+    // that does not exist, because nothing about it looks wrong.
+    let backend = small_colour_backend();
+    let mut camera = backend.open_first().unwrap();
+    camera.set_exposure_us(80_000).unwrap();
+    camera.start_streaming().unwrap();
+    camera.next_frame(TIMEOUT).unwrap();
+
+    // Change something mid-exposure. The very next frame began before this.
+    camera.set_gain(400).unwrap();
+    let next = camera.next_frame(TIMEOUT).unwrap();
+    assert!(
+        !next.meta.settings_settled,
+        "a frame already integrating when the gain changed claimed to describe itself"
+    );
+
+    // And it settles again once a whole exposure has passed.
+    let settled = camera.next_settled_frame(TIMEOUT).unwrap();
+    assert!(settled.meta.settings_settled);
+    assert_eq!(settled.meta.gain, 400);
+}
+
+#[test]
+fn a_control_changed_mid_stream_leaves_the_next_frame_unsettled() {
+    // Controls take effect without interrupting the stream, so a frame is
+    // always caught mid-exposure. Geometry is different — see the test below.
+    let backend = small_colour_backend();
+    let mut camera = backend.open_first().unwrap();
+    camera.set_exposure_us(60_000).unwrap();
+    camera.start_streaming().unwrap();
+
+    type Change = (&'static str, Box<dyn Fn(&mut dyn Camera)>);
+    let changes: Vec<Change> = vec![
+        (
+            "gain",
+            Box::new(|c: &mut dyn Camera| c.set_gain(300).unwrap()),
+        ),
+        (
+            "offset",
+            Box::new(|c: &mut dyn Camera| c.set_offset(20).unwrap()),
+        ),
+        (
+            "exposure",
+            Box::new(|c: &mut dyn Camera| c.set_exposure_us(60_000).unwrap()),
+        ),
+        (
+            "white balance",
+            Box::new(|c: &mut dyn Camera| {
+                c.set_white_balance(WhiteBalance {
+                    red: 120,
+                    green: 100,
+                    blue: 140,
+                })
+                .unwrap()
+            }),
+        ),
+    ];
+
+    for (what, apply) in changes {
+        // Settle first, so the next frame's state is down to this change.
+        camera.next_settled_frame(TIMEOUT).unwrap();
+        apply(camera.as_mut());
+        let frame = camera.next_frame(TIMEOUT).unwrap();
+        assert!(
+            !frame.meta.settings_settled,
+            "changing the {what} left the next frame claiming to describe itself"
+        );
+    }
+}
+
+#[test]
+fn a_settled_frame_always_matches_the_settings_it_claims() {
+    // The contract that matters, across every kind of setting: whatever a
+    // frame says about itself is true of its pixels. Geometry changes restart
+    // the stream, which flushes anything in flight, so they reach this state
+    // by a different route than the controls do — both must arrive there.
+    let backend = small_colour_backend();
+    let mut camera = backend.open_first().unwrap();
+    camera.set_exposure_us(30_000).unwrap();
+    camera.start_streaming().unwrap();
+
+    camera.set_gain(275).unwrap();
+    assert_eq!(camera.next_settled_frame(TIMEOUT).unwrap().meta.gain, 275);
+
+    camera.set_offset(33).unwrap();
+    assert_eq!(camera.next_settled_frame(TIMEOUT).unwrap().meta.offset, 33);
+
+    camera.set_exposure_us(25_000).unwrap();
+    assert_eq!(
+        camera.next_settled_frame(TIMEOUT).unwrap().meta.exposure_us,
+        25_000
+    );
+
+    camera.set_roi(Roi::new(0, 0, 32, 32)).unwrap();
+    let frame = camera.next_settled_frame(TIMEOUT).unwrap();
+    assert_eq!(frame.meta.roi, Roi::new(0, 0, 32, 32));
+    assert_eq!((frame.width(), frame.height()), (32, 32));
+
+    camera.set_binning(Binning(2)).unwrap();
+    assert_eq!(
+        camera.next_settled_frame(TIMEOUT).unwrap().meta.binning,
+        Binning(2)
+    );
+
+    camera.set_bit_depth(BitDepth::EIGHT).unwrap();
+    assert_eq!(
+        camera.next_settled_frame(TIMEOUT).unwrap().meta.bit_depth,
+        BitDepth::EIGHT
+    );
+}
+
+#[test]
+fn snap_never_returns_a_frame_that_misdescribes_itself() {
+    let backend = small_colour_backend();
+    let mut camera = backend.open_first().unwrap();
+    camera.set_exposure_us(40_000).unwrap();
+    camera.start_streaming().unwrap();
+    camera.next_settled_frame(TIMEOUT).unwrap();
+
+    camera.set_gain(250).unwrap();
+    // Immediately after a change, so the frames in flight are all stale.
+    let frame = camera.snap(TIMEOUT).unwrap();
+    assert!(frame.meta.settings_settled);
+    assert_eq!(frame.meta.gain, 250, "the header must match the pixels");
 }
