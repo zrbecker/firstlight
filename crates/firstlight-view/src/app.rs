@@ -166,10 +166,23 @@ pub struct FirstLightApp {
     pub capture_delay_s: f32,
     pub last_saved: Option<PathBuf>,
     pub auto_reconnect: bool,
+    /// Where the master dark is kept between sessions, if anywhere.
+    dark_path: Option<PathBuf>,
 }
 
 impl FirstLightApp {
     pub fn new(ctx: &egui::Context, registry: Registry) -> FirstLightApp {
+        FirstLightApp::with_dark_path(ctx, registry, MasterDark::default_path())
+    }
+
+    /// As [`FirstLightApp::new`], but with the master dark kept somewhere
+    /// specific. Tests use it so a run never reads or deletes the dark
+    /// belonging to whoever is running them.
+    pub fn with_dark_path(
+        ctx: &egui::Context,
+        registry: Registry,
+        dark_path: Option<PathBuf>,
+    ) -> FirstLightApp {
         ctx.set_visuals(egui::Visuals::dark());
         let worker = WorkerHandle::spawn(registry);
         let renderer = Renderer::spawn(worker.frame_ring(), DisplayOptions::default());
@@ -177,7 +190,7 @@ impl FirstLightApp {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
 
-        FirstLightApp {
+        let mut app = FirstLightApp {
             worker,
             renderer,
             viewport_width: 1024.0,
@@ -198,7 +211,7 @@ impl FirstLightApp {
             display_times: VecDeque::new(),
             auto_stretch: true,
             dark: None,
-            subtract_dark: true,
+            subtract_dark: false,
             taking_darks: false,
             confirming_darks: false,
             dark_frames: 64,
@@ -218,6 +231,45 @@ impl FirstLightApp {
             capture_delay_s: 0.0,
             last_saved: None,
             auto_reconnect: true,
+            dark_path,
+        };
+        app.load_saved_dark();
+        app
+    }
+
+    /// Pick up the dark left behind by the last session.
+    ///
+    /// Loaded but not switched on: it was taken at whatever the camera was
+    /// set to last night, which may be nothing like tonight, and quietly
+    /// subtracting a stale dark is worse than not having one. The checkbox
+    /// is one click, and the summary next to it says what the dark is.
+    fn load_saved_dark(&mut self) {
+        let Some(path) = self.dark_path.clone() else {
+            return;
+        };
+        if !path.exists() {
+            return;
+        }
+        match MasterDark::load(&path) {
+            Ok(dark) => {
+                self.push_log(
+                    LogKind::Info,
+                    format!(
+                        "loaded a master dark from the last session: {} frames at {:.3}s, \
+                         gain {}, offset {} (subtraction is off until you turn it on)",
+                        dark.frames,
+                        dark.exposure().as_secs_f32(),
+                        dark.gain,
+                        dark.offset
+                    ),
+                );
+                self.dark = Some(Arc::new(dark));
+                self.subtract_dark = false;
+            }
+            Err(e) => self.push_log(
+                LogKind::Warning,
+                format!("ignoring the saved dark at {}: {e}", path.display()),
+            ),
         }
     }
 
@@ -370,10 +422,23 @@ impl FirstLightApp {
     }
 
     /// Stop subtracting and throw the dark away.
+    /// Throw the master dark away, this session and the next.
+    ///
+    /// The saved copy goes too. Leaving it would bring the dark back at the
+    /// next start, which is not what "clear" means to anybody pressing it.
     pub fn clear_dark(&mut self) {
         self.dark = None;
         self.subtract_dark = false;
         self.renderer.set_dark(None);
+        if let Some(path) = self.dark_path.clone()
+            && path.exists()
+            && let Err(e) = std::fs::remove_file(&path)
+        {
+            self.push_log(
+                LogKind::Warning,
+                format!("could not delete the saved dark at {}: {e}", path.display()),
+            );
+        }
     }
 
     /// Keep the renderer told whether to subtract, and stop it subtracting a
@@ -503,6 +568,21 @@ impl FirstLightApp {
                                 dark.offset
                             ),
                         );
+                        // Keep it for next time. A failure here costs the
+                        // persistence, not the dark that was just taken, so
+                        // it is reported and stepped over.
+                        if let Some(path) = self.dark_path.clone() {
+                            match dark.save(&path) {
+                                Ok(()) => self.push_log(
+                                    LogKind::Info,
+                                    format!("saved the dark to {}", path.display()),
+                                ),
+                                Err(e) => self.push_log(
+                                    LogKind::Warning,
+                                    format!("could not save the dark to {}: {e}", path.display()),
+                                ),
+                            }
+                        }
                         let dark = Arc::new(*dark);
                         self.renderer.set_dark(Some(dark.clone()));
                         self.dark = Some(dark);

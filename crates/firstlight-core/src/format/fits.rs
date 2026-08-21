@@ -16,7 +16,7 @@ use crate::format::pad_ascii;
 use crate::frame::{Frame, PixelFormat};
 use crate::time_util::utc_from_system_time;
 
-const BLOCK: usize = 2880;
+pub(crate) const BLOCK: usize = 2880;
 const CARD: usize = 80;
 
 /// Order the rows sit in the file. Cameras hand over the first row read out
@@ -268,12 +268,12 @@ fn clip(s: &str, max: usize) -> &str {
 
 /// Accumulates 80-column FITS cards.
 #[derive(Default)]
-struct Cards {
+pub(crate) struct Cards {
     buf: Vec<u8>,
 }
 
 impl Cards {
-    fn push(&mut self, text: &str) {
+    pub(crate) fn push(&mut self, text: &str) {
         let start = self.buf.len();
         self.buf.resize(start + CARD, b' ');
         pad_ascii(&mut self.buf[start..start + CARD], text);
@@ -284,7 +284,7 @@ impl Cards {
     }
 
     /// `KEYWORD= <value padded to col 30> / comment`
-    fn valued(&mut self, key: &str, value: &str, comment: &str) {
+    pub(crate) fn valued(&mut self, key: &str, value: &str, comment: &str) {
         let key = clip(key, 8);
         let mut card = format!("{key:<8}= {value:>20}");
         if !comment.is_empty() {
@@ -295,11 +295,11 @@ impl Cards {
         self.push(&card);
     }
 
-    fn integer(&mut self, key: &str, value: i64, comment: &str) {
+    pub(crate) fn integer(&mut self, key: &str, value: i64, comment: &str) {
         self.valued(key, &value.to_string(), comment);
     }
 
-    fn float(&mut self, key: &str, value: f64, comment: &str) {
+    pub(crate) fn float(&mut self, key: &str, value: f64, comment: &str) {
         // Fixed point, trailing zeros trimmed but always at least one decimal
         // digit so the card is unambiguously floating point rather than an
         // integer a strict reader would type differently.
@@ -315,7 +315,7 @@ impl Cards {
         self.valued(key, &text, comment);
     }
 
-    fn logical(&mut self, key: &str, value: bool, comment: &str) {
+    pub(crate) fn logical(&mut self, key: &str, value: bool, comment: &str) {
         self.valued(key, if value { "T" } else { "F" }, comment);
     }
 
@@ -340,7 +340,7 @@ impl Cards {
     }
 
     /// Pad the header out to whole 2880 byte blocks with blank cards.
-    fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Vec<u8> {
         let remainder = self.buf.len() % BLOCK;
         if remainder != 0 {
             self.buf.resize(self.buf.len() + (BLOCK - remainder), b' ');

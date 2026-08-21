@@ -53,7 +53,7 @@ impl Ui {
 
     fn with_registry(registry: Registry) -> Ui {
         let ctx = egui::Context::default();
-        let app = FirstLightApp::new(&ctx, registry);
+        let app = FirstLightApp::with_dark_path(&ctx, registry, Some(scratch_dark_path()));
         Ui {
             ctx,
             app,
@@ -388,4 +388,21 @@ fn taking_darks_asks_you_to_cover_the_camera_first() {
     assert!(ui.shows("Subtract dark"), "painted: {:#?}", ui.painted);
     assert!(ui.shows("frames at"), "painted: {:#?}", ui.painted);
     assert!(ui.shows("dark"), "painted: {:#?}", ui.painted);
+}
+
+/// A saved-dark path of this test's own, inside the temp directory.
+///
+/// The app loads a master dark at start and deletes it on Clear. Tests must
+/// not reach the one belonging to whoever is running them, and must not
+/// reach each other's either — they run in parallel in one process.
+fn scratch_dark_path() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "firstlight-test-dark-{}-{}.fits",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::remove_file(&path).ok();
+    path
 }

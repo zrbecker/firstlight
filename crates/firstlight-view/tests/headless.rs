@@ -34,7 +34,7 @@ impl Harness {
         let sim = backend.handle(0).unwrap();
         let registry = Registry::new().with(backend as Arc<dyn Backend>);
         let ctx = egui::Context::default();
-        let app = FirstLightApp::new(&ctx, registry);
+        let app = FirstLightApp::with_dark_path(&ctx, registry, Some(scratch_dark_path()));
         Harness { ctx, app, sim }
     }
 
@@ -773,4 +773,78 @@ fn a_dark_stops_being_used_when_the_settings_change() {
     // Kept rather than thrown away: going back to the old exposure makes it
     // usable again without taking another set.
     assert!(harness.app.dark.is_some());
+}
+
+#[test]
+fn a_dark_survives_a_restart_but_arrives_switched_off() {
+    let path = scratch_dark_path();
+    let take = |path: &std::path::PathBuf| {
+        let backend = Arc::new(SimulatorBackend::single(
+            64,
+            48,
+            PixelFormat::Bayer(BayerPattern::Rggb),
+        ));
+        let sim = backend.handle(0).unwrap();
+        let registry = Registry::new().with(backend as Arc<dyn Backend>);
+        let ctx = egui::Context::default();
+        let app = FirstLightApp::with_dark_path(&ctx, registry, Some(path.clone()));
+        Harness { ctx, app, sim }
+    };
+
+    let mut first = take(&path);
+    first.connect();
+    first.app.send(WorkerCommand::StartStream);
+    first.run_until("a frame", |app| app.texture.is_some());
+    first.app.dark_frames = 4;
+    first.app.take_darks();
+    first.run_until("the dark", |app| app.dark.is_some());
+    let taken = first.app.dark.clone().unwrap();
+    // Freshly taken, it goes straight to work — that was an explicit act.
+    assert!(first.app.subtract_dark);
+    assert!(
+        path.exists(),
+        "it should have been saved to {}",
+        path.display()
+    );
+    drop(first);
+
+    // A new session finds it waiting.
+    let second = take(&path);
+    let loaded = second.app.dark.clone().expect("the dark from last time");
+    assert_eq!(loaded.frames, taken.frames);
+    assert_eq!(loaded.gain, taken.gain);
+    assert_eq!(loaded.exposure_us, taken.exposure_us);
+    // But it does not start subtracting on its own: last night's settings
+    // are not necessarily tonight's, and a stale dark quietly applied is
+    // worse than no dark at all.
+    assert!(
+        !second.app.subtract_dark,
+        "a loaded dark must wait to be switched on"
+    );
+    drop(second);
+
+    // Clearing means clearing, including for the next session.
+    let mut third = take(&path);
+    assert!(third.app.dark.is_some());
+    third.app.clear_dark();
+    assert!(!path.exists(), "Clear should remove the saved copy too");
+    drop(third);
+    assert!(take(&path).app.dark.is_none());
+}
+
+/// A saved-dark path of this test's own, inside the temp directory.
+///
+/// The app loads a master dark at start and deletes it on Clear. Tests must
+/// not reach the one belonging to whoever is running them, and must not
+/// reach each other's either — they run in parallel in one process.
+fn scratch_dark_path() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "firstlight-test-dark-{}-{}.fits",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::remove_file(&path).ok();
+    path
 }

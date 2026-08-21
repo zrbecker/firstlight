@@ -16,9 +16,13 @@
 //! calibration belongs in processing where it can be redone, checked, and
 //! combined with flats and bias frames.
 
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
+use crate::format::fits::{BLOCK, Cards};
 use crate::frame::{Frame, FrameMeta};
 
 /// How different an exposure may be and still count as matching, as a
@@ -323,6 +327,210 @@ fn percentile(values: &[f32], percent: f32) -> f32 {
     high
 }
 
+/// Version stamp in a saved dark, so a future format change can be told
+/// apart from a corrupt file rather than being read as garbage.
+const FILE_VERSION: i64 = 1;
+
+impl MasterDark {
+    /// Where a master dark is kept between sessions.
+    ///
+    /// One file, overwritten each time darks are taken: the last set is the
+    /// one that matches how the camera is set up now, and a dark that no
+    /// longer applies says so rather than being silently wrong. Returns
+    /// `None` only if the platform's data directory cannot be worked out,
+    /// which means the caller carries on without persistence rather than
+    /// failing.
+    pub fn default_path() -> Option<PathBuf> {
+        let dir = if cfg!(target_os = "macos") {
+            PathBuf::from(std::env::var_os("HOME")?)
+                .join("Library")
+                .join("Application Support")
+        } else if cfg!(windows) {
+            PathBuf::from(std::env::var_os("APPDATA")?)
+        } else if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+            PathBuf::from(data)
+        } else {
+            PathBuf::from(std::env::var_os("HOME")?)
+                .join(".local")
+                .join("share")
+        };
+        Some(dir.join("firstlight").join("master-dark.fits"))
+    }
+
+    /// Write the master to `path`, creating the directory if needed.
+    ///
+    /// The format is FITS with `BITPIX = -32`, so the file opens in anything
+    /// that reads astronomical images and the averages keep their fractional
+    /// part. A master is not an image of anything, but being able to look at
+    /// one is the point: a dark that turns out to have been taken uncovered
+    /// is otherwise invisible after the fact.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        self.write_to(&mut out)?;
+        out.into_inner().map_err(|e| Error::other(e.to_string()))?;
+        Ok(())
+    }
+
+    fn write_to(&self, out: &mut impl Write) -> Result<()> {
+        let mut cards = Cards::default();
+        cards.logical("SIMPLE", true, "FITS standard");
+        cards.integer("BITPIX", -32, "IEEE single precision");
+        cards.integer("NAXIS", 2, "");
+        cards.integer(
+            "NAXIS1",
+            (self.shape.width as usize * self.shape.samples_per_pixel) as i64,
+            "samples per row",
+        );
+        cards.integer("NAXIS2", i64::from(self.shape.height), "rows");
+        cards.logical("FLDARK", true, "a FirstLight master dark");
+        cards.integer("FLDARKV", FILE_VERSION, "master dark format version");
+        cards.float(
+            "EXPTIME",
+            self.exposure().as_secs_f64(),
+            "[s] exposure it was taken at",
+        );
+        cards.float("EXPOSURE", self.exposure().as_secs_f64(), "[s] duplicate");
+        cards.integer("GAIN", self.gain, "gain it was taken at");
+        cards.integer("OFFSET", self.offset, "[ADU] offset it was taken at");
+        cards.integer("DARKFRMS", self.frames as i64, "frames averaged");
+        cards.float("PEDESTAL", f64::from(self.pedestal), "level added back");
+        cards.float(
+            "CLIPFRAC",
+            f64::from(self.clipped),
+            "fraction of input samples at zero",
+        );
+        cards.integer(
+            "BYTESPS",
+            self.shape.bytes_per_sample as i64,
+            "bytes per sample of the frames it corrects",
+        );
+        cards.integer(
+            "SAMPPPIX",
+            self.shape.samples_per_pixel as i64,
+            "samples per pixel",
+        );
+        cards.push("END");
+        out.write_all(&cards.finish())?;
+
+        // FITS is big-endian, whatever the machine that wrote it.
+        let mut bytes = Vec::with_capacity(self.samples.len() * 4);
+        for sample in &self.samples {
+            bytes.extend_from_slice(&sample.to_be_bytes());
+        }
+        out.write_all(&bytes)?;
+        let padding = (BLOCK - bytes.len() % BLOCK) % BLOCK;
+        if padding > 0 {
+            out.write_all(&vec![0u8; padding])?;
+        }
+        Ok(())
+    }
+
+    /// Read back a master written by [`MasterDark::save`].
+    ///
+    /// Strict about its own format rather than forgiving: a file that does
+    /// not say what it is gets rejected, because a dark read wrongly would
+    /// quietly corrupt every frame it touched.
+    pub fn load(path: impl AsRef<Path>) -> Result<MasterDark> {
+        let bytes = std::fs::read(path.as_ref())?;
+        let (header, data) = split_header(&bytes)?;
+
+        if header.get("FLDARK").map(String::as_str) != Some("T") {
+            return Err(Error::other("not a FirstLight master dark"));
+        }
+        let version = integer(&header, "FLDARKV")?;
+        if version != FILE_VERSION {
+            return Err(Error::other(format!(
+                "this master dark is version {version}, and this build reads version {FILE_VERSION}"
+            )));
+        }
+        if integer(&header, "BITPIX")? != -32 {
+            return Err(Error::other(
+                "a master dark must hold floating point samples",
+            ));
+        }
+
+        let samples_per_pixel = integer(&header, "SAMPPPIX")?.max(1) as usize;
+        let row = integer(&header, "NAXIS1")?.max(0) as usize;
+        let height = integer(&header, "NAXIS2")?.max(0) as u32;
+        let width = (row / samples_per_pixel) as u32;
+        let shape = Shape {
+            width,
+            height,
+            bytes_per_sample: integer(&header, "BYTESPS")?.clamp(1, 2) as usize,
+            samples_per_pixel,
+        };
+
+        let wanted = shape.samples();
+        if data.len() < wanted * 4 {
+            return Err(Error::other(format!(
+                "this master dark says it holds {wanted} samples but the file only has {}",
+                data.len() / 4
+            )));
+        }
+        let samples: Vec<f32> = data[..wanted * 4]
+            .chunks_exact(4)
+            .map(|b| f32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+
+        Ok(MasterDark {
+            samples,
+            pedestal: float(&header, "PEDESTAL")? as f32,
+            shape,
+            exposure_us: (float(&header, "EXPTIME")? * 1e6).round().max(0.0) as u64,
+            gain: integer(&header, "GAIN")?,
+            offset: integer(&header, "OFFSET")?,
+            frames: integer(&header, "DARKFRMS")?.max(0) as usize,
+            clipped: float(&header, "CLIPFRAC")? as f32,
+        })
+    }
+}
+
+/// Split a FITS file into its keyword map and the data that follows.
+fn split_header(bytes: &[u8]) -> Result<(BTreeMap<String, String>, &[u8])> {
+    let mut header = BTreeMap::new();
+    for (index, card) in bytes.chunks_exact(80).enumerate() {
+        let text = String::from_utf8_lossy(card);
+        let text = text.trim_end();
+        if text.trim() == "END" {
+            // Data starts at the next whole 2880 byte block.
+            let consumed = (index + 1) * 80;
+            let start = consumed.div_ceil(BLOCK) * BLOCK;
+            return Ok((header, bytes.get(start..).unwrap_or(&[])));
+        }
+        let Some((key, rest)) = text.split_once('=') else {
+            continue;
+        };
+        // Strip a trailing comment, but not one inside a quoted string.
+        let value = match rest.split_once('/') {
+            Some((value, _)) if !value.contains('\'') => value,
+            _ => rest,
+        };
+        header.insert(
+            key.trim().to_string(),
+            value.trim().trim_matches('\'').trim().to_string(),
+        );
+    }
+    Err(Error::other("this file has no FITS header"))
+}
+
+fn integer(header: &BTreeMap<String, String>, key: &str) -> Result<i64> {
+    header
+        .get(key)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| Error::other(format!("a master dark needs a {key} keyword")))
+}
+
+fn float(header: &BTreeMap<String, String>, key: &str) -> Result<f64> {
+    header
+        .get(key)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| Error::other(format!("a master dark needs a {key} keyword")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +699,43 @@ mod tests {
             data.extend_from_slice(&value.to_le_bytes());
         }
         Frame::new(meta, data).unwrap()
+    }
+
+    #[test]
+    fn a_saved_dark_comes_back_the_same() {
+        let dark = MasterDark::from_frames(&[big_frame(0.0005), big_frame(0.0005)]).unwrap();
+        let path = std::env::temp_dir().join(format!("fl-dark-{}.fits", std::process::id()));
+        dark.save(&path).unwrap();
+        let back = MasterDark::load(&path).unwrap();
+
+        assert_eq!(back.frames, dark.frames);
+        assert_eq!(back.gain, dark.gain);
+        assert_eq!(back.offset, dark.offset);
+        assert_eq!(back.exposure_us, dark.exposure_us);
+        assert_eq!(back.shape, dark.shape);
+        assert_eq!(back.pedestal, dark.pedestal);
+        // The samples matter most: a dark that comes back subtly different
+        // would put its own error into every frame it touches.
+        assert_eq!(back.samples, dark.samples);
+
+        // And it still does its job after the trip through the file.
+        let frame = big_frame(0.0005);
+        assert_eq!(back.apply(&frame).data, dark.apply(&frame).data);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_master_dark_is_refused() {
+        // Reading some other FITS file as a dark would corrupt every frame
+        // it touched, silently, so this must fail rather than improvise.
+        let path = std::env::temp_dir().join(format!("fl-notdark-{}.fits", std::process::id()));
+        std::fs::write(&path, vec![b' '; 5760]).unwrap();
+        assert!(MasterDark::load(&path).is_err());
+
+        std::fs::write(&path, b"nowhere near a FITS file").unwrap();
+        assert!(MasterDark::load(&path).is_err());
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
