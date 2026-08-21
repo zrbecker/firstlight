@@ -37,14 +37,43 @@ use crate::frame::{Frame, FrameMeta};
 /// rather than signal.
 pub const MAX_DEPTH: usize = 64;
 
-/// A rolling mean of the last `depth` frames.
+/// How the frames in the window are combined into one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Combine {
+    /// The arithmetic mean. Cheap — one add and one subtract per pixel as
+    /// the window slides — and the best estimator when nothing goes wrong.
+    /// It keeps outliers, though: a single sample of 60000 ADU still lifts a
+    /// 64-frame mean by nearly a thousand, and it stays there for the whole
+    /// window.
+    #[default]
+    Mean,
+    /// The per-pixel median. Discards outliers outright rather than diluting
+    /// them, at the cost of re-reading the whole window for every displayed
+    /// frame. Measured on covered frames at gain 450 with the dark
+    /// subtracted, it left a quarter as many bright specks as the mean.
+    Median,
+}
+
+impl Combine {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Combine::Mean => "mean",
+            Combine::Median => "median",
+        }
+    }
+}
+
+/// A rolling combination of the last `depth` frames.
 ///
-/// Keeps a running sum so each new frame costs one add and one subtract per
-/// pixel rather than a full re-average, which matters at a megapixel and
-/// twenty-five frames a second.
+/// Keeps a running sum so a mean costs one add and one subtract per pixel
+/// rather than a full re-average, which matters at a megapixel and
+/// twenty-five frames a second. The sum is maintained even when the median
+/// is selected, so switching between them shows the next frame rather than
+/// starting over.
 #[derive(Debug)]
 pub struct RollingStack {
     depth: usize,
+    combine: Combine,
     /// The frames currently in the window, oldest first.
     frames: VecDeque<Frame>,
     /// Sum of every sample in `frames`, widened so it cannot overflow: 64
@@ -84,6 +113,7 @@ impl RollingStack {
     pub fn new(depth: usize) -> RollingStack {
         RollingStack {
             depth: depth.clamp(1, MAX_DEPTH),
+            combine: Combine::default(),
             frames: VecDeque::new(),
             sum: Vec::new(),
             shape: None,
@@ -92,6 +122,16 @@ impl RollingStack {
 
     pub fn depth(&self) -> usize {
         self.depth
+    }
+
+    pub fn combine(&self) -> Combine {
+        self.combine
+    }
+
+    /// Change how the window is combined. Takes effect on the next frame;
+    /// the frames already held are kept, so the picture does not blank.
+    pub fn set_combine(&mut self, combine: Combine) {
+        self.combine = combine;
     }
 
     /// Change how many frames are averaged.
@@ -150,12 +190,20 @@ impl RollingStack {
         self.shape = None;
     }
 
-    /// Add a frame and return the current average.
+    /// Add a frame to the window.
+    ///
+    /// Deliberately does not combine: [`RollingStack::result`] does that, and
+    /// keeping them apart is what makes an expensive combine affordable. A
+    /// live view renders far less often than frames arrive — when the median
+    /// takes longer than the frame interval, several frames land between
+    /// repaints — and combining on every arrival meant computing results
+    /// nobody would ever see, while the ones that mattered fell further
+    /// behind.
     ///
     /// A frame of a different shape — a new ROI, binning or bit depth —
     /// starts the stack over, because frames of different sizes cannot be
-    /// averaged at all.
-    pub fn push(&mut self, frame: Frame) -> Frame {
+    /// combined at all.
+    pub fn push(&mut self, frame: Frame) {
         let shape = Shape::of(&frame.meta);
         if self.shape != Some(shape) {
             self.clear();
@@ -168,7 +216,17 @@ impl RollingStack {
         }
         self.add(&frame);
         self.frames.push_back(frame);
-        self.average()
+    }
+
+    /// Combine the window into one frame, or `None` if nothing is in it.
+    pub fn result(&self) -> Option<Frame> {
+        if self.frames.is_empty() {
+            return None;
+        }
+        Some(match self.combine {
+            Combine::Mean => self.average(),
+            Combine::Median => self.median(),
+        })
     }
 
     /// The average of the window, as a frame.
@@ -198,6 +256,71 @@ impl RollingStack {
             }
         }
 
+        Frame::new(self.stack_meta(newest), data)
+            .expect("the average has the shape it was summed from")
+    }
+
+    /// The per-pixel median of the window.
+    ///
+    /// Done in chunks of samples rather than a pixel at a time: gathering
+    /// one pixel from sixty-four separate frame buffers touches sixty-four
+    /// pages for four bytes of use, and at two million pixels that is most
+    /// of the cost. A chunk is gathered from each frame in turn, so every
+    /// buffer is read forwards, then the medians are taken within it.
+    fn median(&self) -> Frame {
+        let newest = self
+            .frames
+            .back()
+            .expect("push always leaves at least one frame");
+        let count = self.frames.len();
+        if count == 1 {
+            return newest.clone();
+        }
+        let shape = self.shape.expect("a shape is set alongside the sum");
+        let samples = shape.samples();
+        let mut data = vec![0u8; samples * shape.bytes_per_sample];
+
+        // Sample-major within a chunk: `window[i * count + f]` is frame `f`'s
+        // value for the chunk's `i`th sample.
+        const CHUNK: usize = 4096;
+        let mut window = vec![0u16; CHUNK * count];
+
+        for start in (0..samples).step_by(CHUNK) {
+            let len = CHUNK.min(samples - start);
+            for (f, frame) in self.frames.iter().enumerate() {
+                let bytes = &frame.data;
+                if shape.bytes_per_sample == 1 {
+                    for (i, byte) in bytes[start..start + len].iter().enumerate() {
+                        window[i * count + f] = u16::from(*byte);
+                    }
+                } else {
+                    let region = &bytes[start * 2..(start + len) * 2];
+                    for (i, pair) in region.chunks_exact(2).enumerate() {
+                        window[i * count + f] = u16::from_le_bytes([pair[0], pair[1]]);
+                    }
+                }
+            }
+            let middle = count / 2;
+            for i in 0..len {
+                let lane = &mut window[i * count..i * count + count];
+                let (_, median, _) = lane.select_nth_unstable(middle);
+                let value = *median;
+                if shape.bytes_per_sample == 1 {
+                    data[start + i] = value as u8;
+                } else {
+                    let at = (start + i) * 2;
+                    data[at..at + 2].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+
+        Frame::new(self.stack_meta(newest), data)
+            .expect("the median has the shape it was gathered from")
+    }
+
+    /// Metadata for a combined frame: the settings every frame in the window
+    /// shares, but a timestamp and exposure that describe the stack.
+    fn stack_meta(&self, newest: &Frame) -> FrameMeta {
         let mut meta = newest.meta.clone();
         meta.timestamp = self
             .frames
@@ -205,7 +328,7 @@ impl RollingStack {
             .map(|first| first.meta.timestamp)
             .unwrap_or(SystemTime::UNIX_EPOCH);
         meta.exposure_us = self.integration().as_micros().min(u64::MAX as u128) as u64;
-        Frame::new(meta, data).expect("the average has the shape it was summed from")
+        meta
     }
 
     fn add(&mut self, frame: &Frame) {
@@ -248,6 +371,63 @@ mod tests {
     use crate::control::{Binning, BitDepth, Roi};
     use crate::frame::PixelFormat;
 
+    /// Push a frame and combine, which is what a caller that wants the
+    /// current picture does.
+    fn combined(stack: &mut RollingStack, frame: Frame) -> Frame {
+        stack.push(frame);
+        stack.result().expect("a frame was just pushed")
+    }
+
+    #[test]
+    fn a_median_throws_an_outlier_away_where_a_mean_dilutes_it() {
+        // The reason for offering it: one bright sample in a window of nine
+        // still lifts a mean, and stays there until it slides out. A median
+        // does not see it at all.
+        let build = |combine: Combine| {
+            let mut stack = RollingStack::new(9);
+            stack.set_combine(combine);
+            for _ in 0..8 {
+                stack.push(frame(1000, BitDepth::SIXTEEN, (4, 4)));
+            }
+            stack.push(frame(60_000, BitDepth::SIXTEEN, (4, 4)));
+            first_sample(&stack.result().unwrap())
+        };
+        let mean = build(Combine::Mean);
+        let median = build(Combine::Median);
+        assert!(mean > 6_000, "a mean should carry the outlier, got {mean}");
+        assert_eq!(median, 1000, "a median should ignore it");
+    }
+
+    #[test]
+    fn switching_how_frames_combine_keeps_the_frames() {
+        // Changing the control mid-session must not blank the live view or
+        // start the window over.
+        let mut stack = RollingStack::new(5);
+        for _ in 0..5 {
+            stack.push(frame(800, BitDepth::SIXTEEN, (4, 4)));
+        }
+        assert_eq!(stack.len(), 5);
+        stack.set_combine(Combine::Median);
+        assert_eq!(stack.len(), 5, "the window survives the switch");
+        assert_eq!(first_sample(&stack.result().unwrap()), 800);
+        stack.set_combine(Combine::Mean);
+        assert_eq!(first_sample(&stack.result().unwrap()), 800);
+    }
+
+    #[test]
+    fn pushing_does_not_combine() {
+        // What makes an expensive median affordable: frames can be taken in
+        // faster than results are asked for, and the cost is paid per
+        // result, not per frame.
+        let mut stack = RollingStack::new(4);
+        assert!(stack.result().is_none(), "nothing in it yet");
+        stack.push(frame(100, BitDepth::SIXTEEN, (4, 4)));
+        // Asking twice without pushing gives the same answer both times.
+        let once = first_sample(&stack.result().unwrap());
+        let twice = first_sample(&stack.result().unwrap());
+        assert_eq!(once, twice);
+    }
+
     fn frame(value: u16, depth: BitDepth, size: (u32, u32)) -> Frame {
         let (width, height) = size;
         let meta = FrameMeta {
@@ -283,11 +463,11 @@ mod tests {
     fn a_depth_of_one_passes_frames_straight_through() {
         let mut stack = RollingStack::new(1);
         assert_eq!(
-            first_sample(&stack.push(frame(100, BitDepth::SIXTEEN, (4, 4)))),
+            first_sample(&combined(&mut stack, frame(100, BitDepth::SIXTEEN, (4, 4)))),
             100
         );
         assert_eq!(
-            first_sample(&stack.push(frame(200, BitDepth::SIXTEEN, (4, 4)))),
+            first_sample(&combined(&mut stack, frame(200, BitDepth::SIXTEEN, (4, 4)))),
             200
         );
         assert_eq!(stack.len(), 1);
@@ -301,11 +481,10 @@ mod tests {
         let values = [300u16, 600, 900, 1200, 1500];
         let mut averages = Vec::new();
         for value in values {
-            averages.push(first_sample(&stack.push(frame(
-                value,
-                BitDepth::SIXTEEN,
-                (4, 4),
-            ))));
+            averages.push(first_sample(&combined(
+                &mut stack,
+                frame(value, BitDepth::SIXTEEN, (4, 4)),
+            )));
         }
         assert_eq!(
             averages,
@@ -335,7 +514,10 @@ mod tests {
             let noise = ((seed >> 16) % 2_000) as i32 - 1_000;
             let value = (TRUTH + noise) as u16;
             single_error += i64::from(noise).abs();
-            stacked = first_sample(&stack.push(frame(value, BitDepth::SIXTEEN, (8, 8))));
+            stacked = first_sample(&combined(
+                &mut stack,
+                frame(value, BitDepth::SIXTEEN, (8, 8)),
+            ));
         }
         let mean_single_error = single_error / 16;
         let stacked_error = (i32::from(stacked) - TRUTH).unsigned_abs() as i64;
@@ -349,19 +531,19 @@ mod tests {
     #[test]
     fn a_change_of_shape_starts_the_stack_over() {
         let mut stack = RollingStack::new(4);
-        stack.push(frame(1000, BitDepth::SIXTEEN, (8, 8)));
-        stack.push(frame(1000, BitDepth::SIXTEEN, (8, 8)));
+        combined(&mut stack, frame(1000, BitDepth::SIXTEEN, (8, 8)));
+        combined(&mut stack, frame(1000, BitDepth::SIXTEEN, (8, 8)));
         assert_eq!(stack.len(), 2);
 
         // A new ROI: the frames are not the same size and cannot be averaged.
-        let smaller = stack.push(frame(500, BitDepth::SIXTEEN, (4, 4)));
+        let smaller = combined(&mut stack, frame(500, BitDepth::SIXTEEN, (4, 4)));
         assert_eq!(stack.len(), 1, "the old frames must be discarded");
         assert_eq!(first_sample(&smaller), 500);
         assert_eq!((smaller.width(), smaller.height()), (4, 4));
 
         // And a change of bit depth, which changes the layout rather than the
         // size, is just as incompatible.
-        let shallower = stack.push(frame(200, BitDepth::EIGHT, (4, 4)));
+        let shallower = combined(&mut stack, frame(200, BitDepth::EIGHT, (4, 4)));
         assert_eq!(stack.len(), 1);
         assert_eq!(first_sample(&shallower), 200);
     }
@@ -369,8 +551,8 @@ mod tests {
     #[test]
     fn eight_bit_frames_stack_too() {
         let mut stack = RollingStack::new(2);
-        stack.push(frame(100, BitDepth::EIGHT, (4, 4)));
-        let averaged = stack.push(frame(200, BitDepth::EIGHT, (4, 4)));
+        combined(&mut stack, frame(100, BitDepth::EIGHT, (4, 4)));
+        let averaged = combined(&mut stack, frame(200, BitDepth::EIGHT, (4, 4)));
         assert_eq!(first_sample(&averaged), 150);
         assert_eq!(averaged.data.len(), 16, "still one byte per sample");
     }
@@ -379,12 +561,12 @@ mod tests {
     fn shrinking_the_depth_keeps_the_newest_frames() {
         let mut stack = RollingStack::new(4);
         for value in [400u16, 800, 1200, 1600] {
-            stack.push(frame(value, BitDepth::SIXTEEN, (4, 4)));
+            combined(&mut stack, frame(value, BitDepth::SIXTEEN, (4, 4)));
         }
         stack.set_depth(2);
         assert_eq!(stack.len(), 2);
         // The two newest, so the picture does not lurch backwards in time.
-        let averaged = stack.push(frame(2000, BitDepth::SIXTEEN, (4, 4)));
+        let averaged = combined(&mut stack, frame(2000, BitDepth::SIXTEEN, (4, 4)));
         assert_eq!(first_sample(&averaged), 1800, "(1600+2000)/2");
     }
 
@@ -392,14 +574,14 @@ mod tests {
     fn the_stack_reports_what_it_represents() {
         let mut stack = RollingStack::new(3);
         for _ in 0..3 {
-            stack.push(frame(100, BitDepth::SIXTEEN, (4, 4)));
+            combined(&mut stack, frame(100, BitDepth::SIXTEEN, (4, 4)));
         }
         // Three one-second frames.
         assert_eq!(stack.integration(), Duration::from_secs(3));
         assert_eq!(stack.len(), 3);
         // The averaged frame's exposure describes the stack, not one frame,
         // so anything reading it downstream is told the truth.
-        let averaged = stack.push(frame(100, BitDepth::SIXTEEN, (4, 4)));
+        let averaged = combined(&mut stack, frame(100, BitDepth::SIXTEEN, (4, 4)));
         assert_eq!(averaged.meta.exposure_us, 3_000_000);
     }
 

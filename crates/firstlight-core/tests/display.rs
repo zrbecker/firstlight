@@ -429,3 +429,122 @@ fn the_preview_agrees_with_what_auto_white_balance_would_do() {
         );
     }
 }
+
+/// A 16-bit mono frame of pure noise around `level`, with `sigma` of spread.
+///
+/// Deterministic: a fixed sequence rather than a random one, so a failure is
+/// the same failure the next time it is run.
+fn noisy_frame(width: u32, height: u32, level: u16, sigma: f32) -> Frame {
+    let meta = FrameMeta {
+        sequence: 0,
+        timestamp: SystemTime::now(),
+        width,
+        height,
+        format: PixelFormat::Mono,
+        bit_depth: BitDepth::SIXTEEN,
+        exposure_us: 50_000,
+        gain: 450,
+        offset: 50,
+        binning: Binning::ONE,
+        roi: Roi::full(width, height),
+        dropped: 0,
+        temperature_c: None,
+        settings_settled: true,
+    };
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut data = Vec::with_capacity((width * height) as usize * 2);
+    for _ in 0..(width * height) {
+        // xorshift, then the average of two draws to round the distribution
+        // off a little; the exact shape does not matter, only that adjacent
+        // pixels are independent.
+        let mut draw = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f32 / (1u64 << 53) as f32 - 0.5
+        };
+        let noise = (draw() + draw()) * sigma * 3.46;
+        let value = (f32::from(level) + noise).clamp(0.0, 65535.0) as u16;
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+    Frame::new(meta, data).unwrap()
+}
+
+#[test]
+fn the_auto_stretch_reports_the_noise_it_can_see() {
+    // Ten times the noise should read as about ten times the noise. The
+    // estimate is from neighbouring pixels, so it must not be thrown by the
+    // level the noise sits on.
+    let quiet = display::render(
+        &noisy_frame(200, 200, 4000, 30.0),
+        &DisplayOptions::default(),
+    );
+    let loud = display::render(
+        &noisy_frame(200, 200, 20000, 300.0),
+        &DisplayOptions::default(),
+    );
+    let ratio = loud.noise_sigma / quiet.noise_sigma;
+    assert!(
+        (6.0..16.0).contains(&ratio),
+        "noise estimate should track the actual noise: {} vs {} is {ratio:.1}x",
+        quiet.noise_sigma,
+        loud.noise_sigma
+    );
+}
+
+#[test]
+fn an_empty_frame_does_not_get_its_noise_stretched_to_full_contrast() {
+    // The bug: a percentile stretch renormalises whatever it is handed, so a
+    // frame holding nothing but noise has that noise expanded across the
+    // whole display. Measured on real covered frames, the stretch landed at
+    // 8 to 14 sigma regardless of how much stacking or dark subtraction had
+    // gone into them — so none of it ever looked like it worked.
+    for sigma in [20.0f32, 100.0, 400.0] {
+        let image = display::render(
+            &noisy_frame(200, 200, 20_000, sigma),
+            &DisplayOptions::default(),
+        );
+        let span = f32::from(image.white - image.black);
+        assert!(
+            span >= 24.0 * image.noise_sigma,
+            "noise of {sigma} was stretched across {span} ADU, only {:.1} sigma",
+            span / image.noise_sigma
+        );
+    }
+}
+
+#[test]
+fn a_frame_with_real_signal_in_it_is_stretched_normally() {
+    // The floor must not flatten a picture that has something in it. Here
+    // the scene spans far more than the noise, so the percentiles open wider
+    // than the floor on their own and it has nothing to do.
+    let mut frame = noisy_frame(200, 200, 8_000, 40.0);
+    let data = frame.data.to_vec();
+    let mut data = data;
+    for y in 0..200usize {
+        for x in 0..200usize {
+            // A broad gradient: real structure, much larger than one pixel.
+            let index = (y * 200 + x) * 2;
+            let base = u16::from_le_bytes([data[index], data[index + 1]]);
+            let ramp = (y as u32 * 200) as u16;
+            let value = base.saturating_add(ramp);
+            data[index..index + 2].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    frame = Frame::new(frame.meta.clone(), data).unwrap();
+
+    let image = display::render(&frame, &DisplayOptions::default());
+    let span = f32::from(image.white - image.black);
+    assert!(
+        span > 32.0 * image.noise_sigma,
+        "the gradient should set the stretch, not the floor: span {span}, \
+         noise {}",
+        image.noise_sigma
+    );
+    // And the black point still sits at the bottom of the scene, not lifted.
+    assert!(
+        image.black < 9_000,
+        "black point drifted to {}",
+        image.black
+    );
+}

@@ -352,17 +352,44 @@ fn the_stack_control_reaches_the_screen() {
     assert!(ui.shows("Stack"), "painted: {:#?}", ui.painted);
     // Reads as "off" rather than a bare 1, and says nothing more until on.
     assert!(ui.shows("off"), "painted: {:#?}", ui.painted);
-    assert!(!ui.shows("averaging"));
+    assert!(!ui.shows("frames over"));
+    // No point offering a choice of how to combine one frame.
+    assert!(!ui.shows("median"));
 
     ui.app.stack_depth = 4;
     ui.app.send(WorkerCommand::StartStream);
     ui.run_until("the stack to fill", |ui| ui.app.stacked_frames >= 2);
     ui.frame();
-    // What it is actually doing is on screen, not just what was asked for.
-    assert!(ui.shows("averaging"), "painted: {:#?}", ui.painted);
+    // What it is actually doing is on screen, not just what was asked for,
+    // including which way it is combining them.
+    assert!(ui.shows("frames over"), "painted: {:#?}", ui.painted);
+    assert!(ui.shows("mean"), "painted: {:#?}", ui.painted);
+    assert!(ui.shows("median"), "painted: {:#?}", ui.painted);
     // And the live view is marked, so a smooth picture is never mistaken
     // for a single clean frame.
     assert!(ui.shows("stack x"), "painted: {:#?}", ui.painted);
+
+    // Choosing the median is reflected in what the panel reports.
+    ui.app.combine = firstlight_core::stack::Combine::Median;
+    ui.run_until("a frame combined by median", |ui| {
+        ui.app.stacked_frames >= 2
+    });
+    ui.frame();
+    assert!(ui.shows("median of"), "painted: {:#?}", ui.painted);
+}
+
+#[test]
+fn the_measured_noise_is_on_screen() {
+    // The number that makes stacking and dark subtraction legible: an
+    // auto-stretch renormalises whatever it is given, so the picture can
+    // look identical while the noise falls fivefold.
+    let mut ui = Ui::new();
+    ui.connect();
+    ui.app.send(WorkerCommand::StartStream);
+    ui.run_until("a frame on screen", |ui| ui.app.texture.is_some());
+    ui.frame();
+    assert!(ui.shows("noise ±"), "painted: {:#?}", ui.painted);
+    assert!(ui.app.last_noise > 0.0, "it should measure something");
 }
 
 #[test]

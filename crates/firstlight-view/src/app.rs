@@ -11,6 +11,7 @@ use firstlight_core::dark::MasterDark;
 use firstlight_core::display::{DisplayOptions, Stretch};
 use firstlight_core::frame::FrameMeta;
 use firstlight_core::registry::Registry;
+use firstlight_core::stack::Combine;
 use firstlight_core::worker::{
     ConnectionState, RecordLimit, RecordRequest, WorkerCommand, WorkerHandle, WorkerStatus,
     WorkerUpdate, timestamped_name,
@@ -116,6 +117,8 @@ pub struct FirstLightApp {
     pub last_meta: Option<FrameMeta>,
     /// Levels the last auto-stretch settled on, shown in the UI.
     pub last_levels: (u16, u16),
+    /// Pixel-scale noise the last render measured, in raw sample units.
+    pub last_noise: f32,
     /// Per-channel gains from the last render, so the preview balance can
     /// show what it is applying.
     pub last_channel_gains: [f32; 3],
@@ -139,6 +142,8 @@ pub struct FirstLightApp {
     pub dark_frames: usize,
     /// How many frames the live view averages. One is off.
     pub stack_depth: usize,
+    /// How the stacked frames are combined.
+    pub combine: Combine,
     /// What the last render actually managed: frames averaged and the
     /// wall-clock they span. Shown rather than assumed, because the renderer
     /// stacks what reaches it and skips frames taken mid-adjustment.
@@ -207,6 +212,7 @@ impl FirstLightApp {
             texture: None,
             last_meta: None,
             last_levels: (0, 0),
+            last_noise: 0.0,
             last_channel_gains: [1.0; 3],
             display_times: VecDeque::new(),
             auto_stretch: true,
@@ -216,6 +222,7 @@ impl FirstLightApp {
             confirming_darks: false,
             dark_frames: 64,
             stack_depth: 1,
+            combine: Combine::default(),
             stacked_frames: 1,
             stacked_span: Duration::ZERO,
             white_balance_preview: true,
@@ -395,6 +402,7 @@ impl FirstLightApp {
         self.texture = None;
         self.last_meta = None;
         self.last_levels = (0, 0);
+        self.last_noise = 0.0;
         self.last_channel_gains = [1.0; 3];
         self.stacked_frames = 1;
         self.stacked_span = Duration::ZERO;
@@ -452,6 +460,7 @@ impl FirstLightApp {
     /// Keep the renderer's stack depth in step with the panel.
     fn flush_stack_depth(&mut self) {
         self.renderer.set_stack_depth(self.stack_depth.max(1));
+        self.renderer.set_combine(self.combine);
     }
 
     fn check_renderer(&mut self) {
@@ -642,6 +651,7 @@ impl FirstLightApp {
         self.stacked_frames = rendered.stacked;
         self.stacked_span = rendered.span;
         self.last_levels = (image.black, image.white);
+        self.last_noise = image.noise_sigma;
         self.last_channel_gains = image.channel_gains;
         self.last_meta = Some(rendered.meta);
 

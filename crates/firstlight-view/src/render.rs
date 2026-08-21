@@ -18,9 +18,9 @@ use std::time::Duration;
 
 use firstlight_core::dark::MasterDark;
 use firstlight_core::display::{self, DisplayImage, DisplayOptions};
-use firstlight_core::frame::{Frame, FrameMeta};
+use firstlight_core::frame::FrameMeta;
 use firstlight_core::ring::FrameRing;
-use firstlight_core::stack::RollingStack;
+use firstlight_core::stack::{Combine, RollingStack};
 
 /// How long the renderer waits for a frame before looking at whether the
 /// display settings changed.
@@ -43,6 +43,8 @@ struct Slot {
     /// `DisplayOptions` because stacking happens before rendering, not as
     /// part of it.
     stack_depth: Mutex<usize>,
+    /// How those frames are combined.
+    combine: Mutex<Combine>,
     /// The master dark to subtract, if one has been taken and the settings
     /// still match it.
     dark: Mutex<Option<Arc<MasterDark>>>,
@@ -68,6 +70,7 @@ impl Renderer {
             latest: Mutex::new(None),
             options: Mutex::new(options),
             stack_depth: Mutex::new(1),
+            combine: Mutex::new(Combine::default()),
             dark: Mutex::new(None),
             stop: AtomicBool::new(false),
             alive: AtomicBool::new(true),
@@ -119,6 +122,12 @@ impl Renderer {
             .unwrap_or_else(|e| e.into_inner()) = depth;
     }
 
+    /// Combine the stacked frames this way. Takes effect on the next
+    /// repaint, keeping the frames already gathered.
+    pub fn set_combine(&self, combine: Combine) {
+        *self.slot.combine.lock().unwrap_or_else(|e| e.into_inner()) = combine;
+    }
+
     /// Subtract this master dark from the preview, or `None` to stop.
     pub fn set_dark(&self, dark: Option<Arc<MasterDark>>) {
         *self.slot.dark.lock().unwrap_or_else(|e| e.into_inner()) = dark;
@@ -164,19 +173,6 @@ impl Drop for Renderer {
 
 /// Add a frame to the stack and return what should be displayed.
 ///
-/// Only frames that describe themselves are stacked. While a control is being
-/// adjusted the camera is still delivering frames exposed under the old
-/// settings, and averaging those with the new ones would show a blend of both
-/// — so the stack is left alone and the newest frame is shown as it is, which
-/// keeps the view live exactly when somebody is watching it to judge a
-/// change.
-fn stack_frame(stack: &mut RollingStack, frame: Frame) -> Frame {
-    if !frame.meta.settings_settled {
-        return frame;
-    }
-    stack.push(frame)
-}
-
 /// Marks the renderer as stopped however the loop leaves — returning, or
 /// unwinding from a panic.
 struct AliveUntilDropped(Arc<Slot>);
@@ -194,19 +190,43 @@ fn run(slot: Arc<Slot>, frames: Arc<FrameRing>) {
     let mut stack = RollingStack::new(1);
 
     while !slot.stop.load(Ordering::SeqCst) {
-        // Drain, stacking each frame as it arrives. Every frame that
-        // reaches this thread contributes, even the ones the display would
-        // otherwise skip past — they cost one add and one subtract each, and
-        // throwing them away would waste signal that is already in hand.
+        // Drain, adding each frame to the window as it arrives. Every frame
+        // that reaches this thread contributes, even the ones the display
+        // would otherwise skip past — throwing them away would waste signal
+        // that is already in hand.
+        //
+        // Combining is deliberately not done here. A median over a deep
+        // window costs hundreds of milliseconds, so several frames land
+        // between repaints; combining on arrival would compute results
+        // nobody sees while the one that matters falls further behind.
+        //
+        // Only frames that describe themselves join the window. While a
+        // control is being adjusted the camera is still delivering frames
+        // exposed under the old settings, and combining those with the new
+        // ones would show a blend of both — so such a frame is shown on its
+        // own instead, which keeps the view live exactly when somebody is
+        // watching it to judge a change.
+        let mut window_changed = false;
+        let mut unsettled = None;
         let mut fresh = false;
-        while let Some(frame) = frames.try_recv() {
-            last_frame = Some(stack_frame(&mut stack, frame));
+        loop {
+            let frame = match frames.try_recv() {
+                Some(frame) => frame,
+                // Nothing waiting: block briefly the first time round so an
+                // idle renderer is not a spin loop.
+                None if fresh => break,
+                None => match frames.recv_timeout(POLL) {
+                    Ok(frame) => frame,
+                    Err(_) => break,
+                },
+            };
             fresh = true;
-        }
-        if !fresh {
-            if let Ok(frame) = frames.recv_timeout(POLL) {
-                last_frame = Some(stack_frame(&mut stack, frame));
-                fresh = true;
+            if frame.meta.settings_settled {
+                stack.push(frame);
+                window_changed = true;
+                unsettled = None;
+            } else {
+                unsettled = Some(frame);
             }
         }
 
@@ -215,6 +235,12 @@ fn run(slot: Arc<Slot>, frames: Arc<FrameRing>) {
         let depth = *slot.stack_depth.lock().unwrap_or_else(|e| e.into_inner());
         if depth != stack.depth() {
             stack.set_depth(depth);
+            window_changed = true;
+        }
+        let combine = *slot.combine.lock().unwrap_or_else(|e| e.into_inner());
+        if combine != stack.combine() {
+            stack.set_combine(combine);
+            window_changed = true;
         }
 
         if slot.forget.swap(false, Ordering::SeqCst) {
@@ -229,6 +255,14 @@ fn run(slot: Arc<Slot>, frames: Arc<FrameRing>) {
 
         if !(fresh || options_changed) {
             continue;
+        }
+        // Combine once, and only when the window it draws from has moved.
+        // A display setting changing does not need the frames combined
+        // again — the result would be identical.
+        if let Some(frame) = unsettled {
+            last_frame = Some(frame);
+        } else if window_changed {
+            last_frame = stack.result().or(last_frame.take());
         }
         let Some(frame) = &last_frame else {
             continue;

@@ -3,6 +3,7 @@
 
 use egui::{Color32, RichText};
 use firstlight_core::control::ControlId;
+use firstlight_core::stack::Combine;
 use firstlight_core::worker::{ConnectionState, WorkerCommand};
 
 use crate::app::{FirstLightApp, LogKind, RoiChoice};
@@ -491,9 +492,29 @@ fn display_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
         );
     });
     if app.stack_depth > 1 {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("combine").small().color(Color32::GRAY));
+            ui.selectable_value(&mut app.combine, Combine::Mean, "mean")
+                .on_hover_text(
+                    "The average. Cheap, and the best estimator when nothing \
+                     goes wrong — but one bright sample still lifts the result \
+                     and stays there for the whole window.",
+                );
+            ui.selectable_value(&mut app.combine, Combine::Median, "median")
+                .on_hover_text(
+                    "Throws outliers away instead of diluting them. Measured \
+                     on covered frames at gain 450 with a dark subtracted, a \
+                     64-deep median left a quarter as many bright specks as \
+                     the mean, at about 25% more noise. It costs far more to \
+                     compute: the whole window is re-read for every repaint, \
+                     so the live view slows to a few frames a second at full \
+                     sensor size. The camera and any recording are unaffected.",
+                );
+        });
         ui.label(
             RichText::new(format!(
-                "averaging {} frame{} over {:.1}s",
+                "{} of {} frame{} over {:.1}s",
+                app.combine.label(),
                 app.stacked_frames,
                 if app.stacked_frames == 1 { "" } else { "s" },
                 app.stacked_span.as_secs_f32()
@@ -517,13 +538,34 @@ fn display_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
             .clamping(egui::SliderClamping::Always),
     );
     if app.auto_stretch {
+        let span = f32::from(app.last_levels.1.saturating_sub(app.last_levels.0));
+        // The noise matters more than the levels do. An auto-stretch
+        // renormalises whatever it is handed, so stacking sixty-four frames
+        // or subtracting a dark can leave the picture looking much as it did
+        // while this number falls by a factor of five — and without it there
+        // is no way to tell noise reduction that works from noise reduction
+        // that does nothing.
         ui.label(
             RichText::new(format!(
-                "levels {} – {}",
-                app.last_levels.0, app.last_levels.1
+                "levels {} – {}   noise ±{:.0} ADU ({:.0}:1)",
+                app.last_levels.0,
+                app.last_levels.1,
+                app.last_noise,
+                if app.last_noise > 0.0 {
+                    span / app.last_noise
+                } else {
+                    0.0
+                }
             ))
             .small()
             .color(Color32::GRAY),
+        )
+        .on_hover_text(
+            "The measured pixel-to-pixel noise, and how many times it fits \
+             into the stretch. Watch it fall as you stack frames or subtract \
+             a dark: the picture may not look very different, because the \
+             stretch expands whatever range it is given, but the number says \
+             whether the noise actually went down.",
         );
     }
     // Show what the preview balance is actually doing, so the correction is

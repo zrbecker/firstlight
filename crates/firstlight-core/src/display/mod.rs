@@ -85,6 +85,14 @@ pub struct DisplayImage {
     /// to green. All ones when it is off. Reported so the correction can be
     /// shown rather than being invisible.
     pub channel_gains: [f32; 3],
+    /// Pixel-scale noise in the displayed image, in raw sample units.
+    ///
+    /// Worth reporting because the auto-stretch hides it: a percentile
+    /// stretch renormalises whatever it is given, so stacking sixty-four
+    /// frames or subtracting a dark leaves the picture looking much as it
+    /// did while this number falls by a factor of five. Without it there is
+    /// no way to tell a working noise reduction from one that does nothing.
+    pub noise_sigma: f32,
 }
 
 impl DisplayImage {
@@ -208,7 +216,14 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
     } else {
         ChannelCorrection::none()
     };
-    let (black, white) = levels(&histogram, rgb.len(), options.stretch, full_scale);
+    let noise_sigma = neighbour_sigma(&rgb, out_w, out_h, full_scale);
+    let (black, white) = levels(
+        &histogram,
+        rgb.len(),
+        options.stretch,
+        full_scale,
+        noise_sigma,
+    );
     let rgba = map_to_rgba(&rgb, &correction, black, white, options.gamma);
 
     DisplayImage {
@@ -218,7 +233,56 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
         black,
         white,
         channel_gains: correction.gains,
+        noise_sigma,
     }
+}
+
+/// Pixel-scale noise, estimated from how much neighbouring pixels differ.
+///
+/// The frame's own histogram cannot answer this. Measured on covered frames
+/// at gain 450, the spread of all pixel values was 2829 ADU before dark
+/// subtraction and 68 after — almost all of it fixed pattern rather than
+/// noise, and a floor built on that number would have been forty times too
+/// large. Neighbouring pixels differ by the noise and by real structure, and
+/// real structure is mostly larger than one pixel, so the *median*
+/// difference is dominated by noise.
+///
+/// The quartile rather than the median, because real structure contaminates
+/// this from above: every pair straddling a star edge reads as an enormous
+/// difference. A median survives up to half the pairs being structure, a
+/// lower quartile up to three quarters — which is the difference between
+/// working and not on a dense field. Measured on a simulated frame packed
+/// with 220 stars in 3072 pixels, the median read 2349 ADU against a true
+/// noise of roughly 300.
+///
+/// The 0.4506 turns that quartile into a standard deviation: the difference
+/// of two independent samples is distributed as `sigma * sqrt(2)`, and the
+/// lower quartile of its absolute value is 0.3186 of that.
+fn neighbour_sigma(rgb: &[[u16; 3]], width: u32, height: u32, full_scale: u16) -> f32 {
+    if width < 2 || height == 0 || rgb.is_empty() {
+        return 0.0;
+    }
+    let scale = f32::from(full_scale.max(1));
+    let bin_of =
+        |value: u32| (((value as f32 / scale) * (BINS - 1) as f32).round() as usize).min(BINS - 1);
+    let luminance =
+        |px: &[u16; 3]| (u32::from(px[0]) + 2 * u32::from(px[1]) + u32::from(px[2])) / 4;
+
+    let mut differences = vec![0u32; BINS];
+    let mut counted = 0usize;
+    for row in rgb.chunks_exact(width as usize) {
+        for pair in row.windows(2) {
+            let delta = luminance(&pair[0]).abs_diff(luminance(&pair[1]));
+            differences[bin_of(delta)] += 1;
+            counted += 1;
+        }
+    }
+    if counted == 0 {
+        return 0.0;
+    }
+    let quartile_bin = percentile_bin(&differences, counted, 25.0);
+    let quartile = (quartile_bin as f32 / (BINS - 1) as f32) * scale;
+    quartile / 0.4506
 }
 
 /// A per-channel affine correction that puts every channel on the same scale.
@@ -375,7 +439,29 @@ const BINS: usize = 4096;
 ///
 /// The histogram is of luminance rather than of each channel: per-channel
 /// percentiles would silently white-balance the display.
-fn levels(histogram: &[u32], pixels: usize, stretch: Stretch, full_scale: u16) -> (u16, u16) {
+/// Narrowest span the auto-stretch may map to black-to-white, as a multiple
+/// of the pixel-scale noise.
+///
+/// Without a floor a percentile stretch renormalises anything it is handed,
+/// so an empty frame gets its noise expanded across the full display range
+/// however quiet that noise is. Measured on covered frames at gain 450, the
+/// stretch landed between 8 and 14 sigma whether the frame was a single
+/// exposure, a 64-deep stack, or a 64-deep stack with the dark subtracted —
+/// five-fold differences in actual noise, all rendered to look the same.
+///
+/// Thirty-two puts that noise into a thirty-second of the range instead. It
+/// only ever applies when nothing brighter is present: as soon as the frame
+/// holds real signal, the percentiles open wider than this on their own and
+/// the floor stops mattering.
+const NOISE_FLOOR_SIGMAS: f32 = 32.0;
+
+fn levels(
+    histogram: &[u32],
+    pixels: usize,
+    stretch: Stretch,
+    full_scale: u16,
+    noise_sigma: f32,
+) -> (u16, u16) {
     match stretch {
         Stretch::Linear => (0, full_scale.max(1)),
         Stretch::Manual { black, white } => (black, white.max(black.saturating_add(1))),
@@ -387,6 +473,9 @@ fn levels(histogram: &[u32], pixels: usize, stretch: Stretch, full_scale: u16) -
             let total = pixels as f32;
             let low_target = (total * (low_pct.clamp(0.0, 100.0) / 100.0)) as u32;
             let high_target = (total * (high_pct.clamp(0.0, 100.0) / 100.0)) as u32;
+
+            // Before `histogram` is shadowed by its own iterator below.
+            let brightest_bin = histogram.iter().rposition(|count| *count > 0);
 
             let mut cumulative = 0u32;
             let histogram = histogram.iter();
@@ -412,8 +501,25 @@ fn levels(histogram: &[u32], pixels: usize, stretch: Stretch, full_scale: u16) -
             let black_value = to_value(black);
             // Guarantee a usable span even on a flat frame, or the map below
             // divides by ~zero and the display flashes to pure white.
-            let white_value = to_value(white).max(black_value.saturating_add(1));
-            (black_value, white_value)
+            let mut white_value = to_value(white).max(black_value.saturating_add(1));
+            // And keep the span from closing in on the noise, which is what
+            // makes a frame with nothing in it look like a field of hot
+            // pixels. Black stays where it is: it marks the background, and
+            // moving it would lift the whole picture off the floor.
+            let floor = (NOISE_FLOOR_SIGMAS * noise_sigma.max(0.0)).round();
+            if floor.is_finite() && floor >= 1.0 {
+                // Never past the brightest sample present. Nothing above it
+                // can appear on screen, so widening further only throws
+                // display range away — and it bounds what a noise estimate
+                // fooled by a dense field can cost, since the frame's own
+                // contents do not lie about their range.
+                let brightest = to_value(brightest_bin.unwrap_or(BINS - 1));
+                let wanted = black_value.saturating_add(floor.min(scale) as u16);
+                white_value = white_value
+                    .max(wanted.min(brightest))
+                    .min(full_scale.max(1));
+            }
+            (black_value, white_value.max(black_value.saturating_add(1)))
         }
     }
 }

@@ -832,6 +832,67 @@ fn a_dark_survives_a_restart_but_arrives_switched_off() {
     assert!(take(&path).app.dark.is_none());
 }
 
+#[test]
+fn a_slow_combine_does_not_hold_up_the_ui_thread() {
+    // Stacking, dark subtraction and rendering all belong to the render
+    // thread. A median over a deep window takes hundreds of milliseconds at
+    // sensor size, so if any of it ever moved onto the UI thread the whole
+    // application would stop responding while it ran.
+    //
+    // Expressed as a ratio rather than a deadline, because a loaded machine
+    // slows everything down together: the UI must complete many passes for
+    // each combined image, which is only possible if the two are on
+    // different threads.
+    let backend = Arc::new(SimulatorBackend::single(
+        512,
+        512,
+        PixelFormat::Bayer(BayerPattern::Rggb),
+    ));
+    let sim = backend.handle(0).unwrap();
+    let registry = Registry::new().with(backend as Arc<dyn Backend>);
+    let ctx = egui::Context::default();
+    let app = FirstLightApp::with_dark_path(&ctx, registry, Some(scratch_dark_path()));
+    let mut harness = Harness { ctx, app, sim };
+
+    harness.connect();
+    harness.app.send(WorkerCommand::SetControl {
+        id: firstlight_core::ControlId::ExposureUs,
+        value: 1_000,
+    });
+    harness.app.send(WorkerCommand::StartStream);
+    harness.app.stack_depth = firstlight_core::stack::MAX_DEPTH;
+    harness.app.combine = firstlight_core::stack::Combine::Median;
+    harness.run_until("the window to fill", |app| {
+        app.stacked_frames >= firstlight_core::stack::MAX_DEPTH
+    });
+
+    let mut ui_passes = 0usize;
+    let mut images = 0usize;
+    let mut last = None;
+    let mut slowest = std::time::Duration::ZERO;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        let started = std::time::Instant::now();
+        harness.frame();
+        slowest = slowest.max(started.elapsed());
+        ui_passes += 1;
+        let now = harness.app.last_meta.as_ref().map(|m| m.sequence);
+        if now.is_some() && now != last {
+            images += 1;
+            last = now;
+        }
+    }
+
+    assert!(
+        images > 0,
+        "the renderer produced nothing to compare against"
+    );
+    assert!(
+        ui_passes > images * 4,
+        "the UI managed only {ui_passes} passes for {images} combined images,          so the combine is running on this thread (slowest pass {slowest:?})"
+    );
+}
+
 /// A saved-dark path of this test's own, inside the temp directory.
 ///
 /// The app loads a master dark at start and deletes it on Clear. Tests must
