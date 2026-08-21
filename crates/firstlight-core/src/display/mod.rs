@@ -241,16 +241,37 @@ impl ChannelCorrection {
     }
 }
 
-/// Percentiles used to judge the balance. Fixed rather than taken from the
-/// stretch: what counts as neutral is a property of the picture, not of how
-/// it is being displayed.
-const WB_LOW_PCT: f32 = 0.5;
-const WB_HIGH_PCT: f32 = 99.95;
+/// Percentile taken as each channel's black level. Low rather than zero
+/// because a sensor has a bias offset and the sky has a background.
+const WB_BLACK_PCT: f32 = 0.5;
+/// Fraction of full scale above which a sample is treated as blown out and
+/// left out of the measurement.
+///
+/// This is physics rather than taste: a clipped pixel reads the same in every
+/// channel whatever colour it really was, so including it makes the channels
+/// look balanced however strong the cast is. A lamp, a window or a monitor in
+/// shot does exactly that. Measured on a synthetic scene with R/G 0.55 and
+/// B/G 0.40, judging by the top of each channel's range gave gains of 0.94
+/// and 0.92 — no correction at all — as soon as 2% of the frame was bright.
+///
+/// An absolute threshold rather than a percentile, because how *much* of the
+/// picture is blown out is exactly what must not matter.
+const WB_CLIP_FRACTION: f32 = 0.9;
+/// If less of the picture than this is usable, there is nothing worth
+/// measuring and the balance is left alone.
+const WB_MIN_USABLE: f32 = 0.01;
 
 /// Work out what each channel needs to be scaled by to match green.
 ///
+/// Compares the average level of each channel over the part of the picture
+/// that is neither black nor blown out. That is the same measurement
+/// `Camera::auto_white_balance` makes on the camera's own gains, so the
+/// preview agrees with what pressing Auto WB would do — two different
+/// statistics would mean the preview calling a scene balanced while the
+/// camera disagreed.
+///
 /// Green is the reference because a Bayer sensor has twice as much of it, so
-/// its statistics are the steadiest and leaving it alone keeps the overall
+/// its statistics are the steadiest, and leaving it alone keeps the overall
 /// brightness where it was.
 fn channel_correction(
     channels: &[Vec<u32>; 3],
@@ -260,27 +281,75 @@ fn channel_correction(
     if pixels == 0 {
         return ChannelCorrection::none();
     }
-    let stretch = Stretch::AutoPercentile {
-        low_pct: WB_LOW_PCT,
-        high_pct: WB_HIGH_PCT,
-    };
-    let measured: Vec<(u16, u16)> = channels
-        .iter()
-        .map(|channel| levels(channel, pixels, stretch, full_scale))
-        .collect();
+    let scale = f32::from(full_scale.max(1));
+    let bin_value = |bin: usize| (bin as f32 / (BINS - 1) as f32) * scale;
 
-    let span =
-        |index: usize| f32::from(measured[index].1.saturating_sub(measured[index].0)).max(1.0);
-    let reference = span(1);
-    ChannelCorrection {
-        black: [
-            f32::from(measured[0].0),
-            f32::from(measured[1].0),
-            f32::from(measured[2].0),
-        ],
-        gains: [reference / span(0), 1.0, reference / span(2)],
-        pedestal: f32::from(measured[1].0),
+    let black: Vec<f32> = channels
+        .iter()
+        .map(|channel| bin_value(percentile_bin(channel, pixels, WB_BLACK_PCT)))
+        .collect();
+    let ceiling = scale * WB_CLIP_FRACTION;
+
+    // A scene that is blown out almost everywhere has nothing left to judge
+    // the balance from; guessing would be worse than leaving it.
+    let usable: u64 = channels[1]
+        .iter()
+        .enumerate()
+        .filter(|(bin, _)| bin_value(*bin) <= ceiling)
+        .map(|(_, count)| u64::from(*count))
+        .sum();
+    if (usable as f32) < pixels as f32 * WB_MIN_USABLE {
+        return ChannelCorrection::none();
     }
+
+    let level = |index: usize| {
+        let floor = black[index];
+        mean_between(&channels[index], bin_value, floor, ceiling) - floor
+    };
+    let reference = level(1).max(1.0);
+    // Clamped so a channel that is essentially empty — a narrowband filter,
+    // a lens cap half on — cannot produce an absurd gain.
+    let gain = |index: usize| (reference / level(index).max(1.0)).clamp(0.05, 20.0);
+
+    ChannelCorrection {
+        black: [black[0], black[1], black[2]],
+        gains: [gain(0), 1.0, gain(2)],
+        pedestal: black[1],
+    }
+}
+
+/// The histogram bin below which `percent` of the pixels lie.
+fn percentile_bin(histogram: &[u32], pixels: usize, percent: f32) -> usize {
+    let target = (pixels as f32 * (percent.clamp(0.0, 100.0) / 100.0)) as u32;
+    let mut cumulative = 0u32;
+    for (bin, count) in histogram.iter().enumerate() {
+        cumulative += count;
+        if cumulative >= target {
+            return bin;
+        }
+    }
+    BINS - 1
+}
+
+/// Mean sample value between two levels, ignoring everything outside them.
+fn mean_between(histogram: &[u32], bin_value: impl Fn(usize) -> f32, low: f32, high: f32) -> f32 {
+    let mut total = 0f64;
+    let mut count = 0u64;
+    for (bin, occurrences) in histogram.iter().enumerate() {
+        if *occurrences == 0 {
+            continue;
+        }
+        let value = bin_value(bin);
+        if value < low || value > high {
+            continue;
+        }
+        total += f64::from(value) * f64::from(*occurrences);
+        count += u64::from(*occurrences);
+    }
+    if count == 0 {
+        return low;
+    }
+    (total / count as f64) as f32
 }
 
 /// One sample, without the per-call geometry arithmetic of
