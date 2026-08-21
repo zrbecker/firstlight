@@ -2,10 +2,12 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use firstlight_core::camera::{CameraId, CameraInfo};
 use firstlight_core::control::{Binning, BitDepth, ControlId, ControlInfo, Roi};
+use firstlight_core::dark::MasterDark;
 use firstlight_core::display::{DisplayOptions, Stretch};
 use firstlight_core::frame::FrameMeta;
 use firstlight_core::registry::Registry;
@@ -120,6 +122,16 @@ pub struct FirstLightApp {
     display_times: VecDeque<Instant>,
 
     pub auto_stretch: bool,
+    /// The master dark, once one has been taken this session.
+    pub dark: Option<Arc<MasterDark>>,
+    /// Whether it is being subtracted from the preview.
+    pub subtract_dark: bool,
+    /// True between asking for darks and getting them.
+    pub taking_darks: bool,
+    /// Set while waiting for the user to confirm the camera is covered.
+    pub confirming_darks: bool,
+    /// How many frames a dark is averaged from.
+    pub dark_frames: usize,
     /// How many frames the live view averages. One is off.
     pub stack_depth: usize,
     /// What the last render actually managed: frames averaged and the
@@ -180,6 +192,11 @@ impl FirstLightApp {
             last_channel_gains: [1.0; 3],
             display_times: VecDeque::new(),
             auto_stretch: true,
+            dark: None,
+            subtract_dark: true,
+            taking_darks: false,
+            confirming_darks: false,
+            dark_frames: 16,
             stack_depth: 1,
             stacked_frames: 1,
             stacked_span: Duration::ZERO,
@@ -308,6 +325,7 @@ impl FirstLightApp {
         self.flush_pending_controls();
         self.check_renderer();
         self.flush_stack_depth();
+        self.flush_dark();
         self.update_texture(ctx);
     }
 
@@ -330,6 +348,37 @@ impl FirstLightApp {
     /// Without this a dead render thread leaves the last image on screen
     /// indefinitely: the picture looks live, the display controls stop having
     /// any effect, and only restarting the application clears it.
+    /// Why the dark cannot be used with the frames now arriving, if it
+    /// cannot. A dark is only valid for the settings it was taken at.
+    pub fn dark_mismatch(&self) -> Option<firstlight_core::dark::DarkMismatch> {
+        let dark = self.dark.as_ref()?;
+        let meta = self.last_meta.as_ref()?;
+        dark.mismatch(meta)
+    }
+
+    /// Start taking darks, having asked the user to cover the camera.
+    pub fn take_darks(&mut self) {
+        self.confirming_darks = false;
+        self.taking_darks = true;
+        let frames = self.dark_frames;
+        self.send(WorkerCommand::CaptureDark { frames });
+    }
+
+    /// Stop subtracting and throw the dark away.
+    pub fn clear_dark(&mut self) {
+        self.dark = None;
+        self.subtract_dark = false;
+        self.renderer.set_dark(None);
+    }
+
+    /// Keep the renderer told whether to subtract, and stop it subtracting a
+    /// dark that no longer matches what the camera is doing.
+    fn flush_dark(&mut self) {
+        let usable = self.subtract_dark && self.dark_mismatch().is_none();
+        let dark = usable.then(|| self.dark.clone()).flatten();
+        self.renderer.set_dark(dark);
+    }
+
     /// Keep the renderer's stack depth in step with the panel.
     fn flush_stack_depth(&mut self) {
         self.renderer.set_stack_depth(self.stack_depth.max(1));
@@ -432,6 +481,28 @@ impl FirstLightApp {
                         format!("wrote {} ({frames} frame(s))", path.display()),
                     );
                     self.last_saved = Some(path);
+                }
+                WorkerUpdate::DarkFinished(dark) => {
+                    // Whatever happened, the capture is over: this is the
+                    // only thing that clears the progress display, because
+                    // the status arrives separately and a moment later.
+                    self.taking_darks = false;
+                    if let Some(dark) = dark {
+                        self.push_log(
+                            LogKind::Info,
+                            format!(
+                                "master dark: {} frames at {:.3}s, gain {}, offset {}",
+                                dark.frames,
+                                dark.exposure().as_secs_f32(),
+                                dark.gain,
+                                dark.offset
+                            ),
+                        );
+                        let dark = Arc::new(*dark);
+                        self.renderer.set_dark(Some(dark.clone()));
+                        self.dark = Some(dark);
+                        self.subtract_dark = true;
+                    }
                 }
                 WorkerUpdate::Stopped => {
                     self.push_log(LogKind::Error, "the camera thread stopped");

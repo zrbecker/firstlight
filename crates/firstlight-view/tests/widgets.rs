@@ -364,3 +364,28 @@ fn the_stack_control_reaches_the_screen() {
     // for a single clean frame.
     assert!(ui.shows("stack x"), "painted: {:#?}", ui.painted);
 }
+
+#[test]
+fn taking_darks_asks_you_to_cover_the_camera_first() {
+    // The confirmation step is the whole point: only the person in the room
+    // can cover the camera, and a dark taken uncovered is worse than none.
+    let mut ui = Ui::new();
+    ui.connect();
+    ui.frame();
+    assert!(ui.shows("Take darks"), "painted: {:#?}", ui.painted);
+    assert!(!ui.shows("Cover the camera"));
+
+    ui.app.confirming_darks = true;
+    ui.frame();
+    assert!(ui.shows("Cover the camera"), "painted: {:#?}", ui.painted);
+
+    ui.app.dark_frames = 3;
+    ui.app.take_darks();
+    ui.app.send(WorkerCommand::StartStream);
+    ui.run_until("the dark to arrive", |ui| ui.app.dark.is_some());
+    ui.frame();
+    // Once taken, the control says what it has and the view is marked.
+    assert!(ui.shows("Subtract dark"), "painted: {:#?}", ui.painted);
+    assert!(ui.shows("frames at"), "painted: {:#?}", ui.painted);
+    assert!(ui.shows("dark"), "painted: {:#?}", ui.painted);
+}

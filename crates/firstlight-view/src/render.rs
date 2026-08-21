@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use firstlight_core::dark::MasterDark;
 use firstlight_core::display::{self, DisplayImage, DisplayOptions};
 use firstlight_core::frame::{Frame, FrameMeta};
 use firstlight_core::ring::FrameRing;
@@ -42,6 +43,9 @@ struct Slot {
     /// `DisplayOptions` because stacking happens before rendering, not as
     /// part of it.
     stack_depth: Mutex<usize>,
+    /// The master dark to subtract, if one has been taken and the settings
+    /// still match it.
+    dark: Mutex<Option<Arc<MasterDark>>>,
     stop: AtomicBool,
     /// Cleared when the render loop leaves, including by unwinding, so the
     /// application can tell a stopped renderer from a quiet one.
@@ -64,6 +68,7 @@ impl Renderer {
             latest: Mutex::new(None),
             options: Mutex::new(options),
             stack_depth: Mutex::new(1),
+            dark: Mutex::new(None),
             stop: AtomicBool::new(false),
             alive: AtomicBool::new(true),
             forget: AtomicBool::new(false),
@@ -112,6 +117,11 @@ impl Renderer {
             .stack_depth
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = depth;
+    }
+
+    /// Subtract this master dark from the preview, or `None` to stop.
+    pub fn set_dark(&self, dark: Option<Arc<MasterDark>>) {
+        *self.slot.dark.lock().unwrap_or_else(|e| e.into_inner()) = dark;
     }
 
     /// Forget the last frame, so nothing repaints it.
@@ -223,6 +233,17 @@ fn run(slot: Arc<Slot>, frames: Arc<FrameRing>) {
         let Some(frame) = &last_frame else {
             continue;
         };
+
+        // Calibrate before rendering. Subtracting from the stacked result
+        // rather than from each frame is the same arithmetic — both are
+        // linear — and costs one subtraction per displayed frame instead of
+        // one per captured frame.
+        let dark = slot.dark.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let calibrated = match &dark {
+            Some(dark) => std::borrow::Cow::Owned(dark.apply(frame)),
+            None => std::borrow::Cow::Borrowed(frame),
+        };
+        let frame = calibrated.as_ref();
 
         // A panic while converting one frame should cost that frame, not the
         // live view: dropping the thread here leaves a still picture on

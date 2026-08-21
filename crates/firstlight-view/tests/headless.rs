@@ -698,3 +698,79 @@ fn a_geometry_change_restarts_the_stack_rather_than_mixing_shapes() {
         app.stacked_frames >= 4 && app.last_meta.as_ref().is_some_and(|m| m.width == 32)
     });
 }
+
+#[test]
+fn taking_darks_subtracts_them_from_the_preview_only() {
+    let mut harness = Harness::new();
+    let dir = std::env::temp_dir().join(format!("firstlight-dark-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    harness.connect();
+    harness.app.send(WorkerCommand::SetControl {
+        id: firstlight_core::ControlId::ExposureUs,
+        value: 3_000,
+    });
+    harness.app.send(WorkerCommand::StartStream);
+    harness.run_until("a frame on screen", |app| app.texture.is_some());
+    assert!(harness.app.dark.is_none());
+
+    harness.app.dark_frames = 4;
+    harness.app.take_darks();
+    harness.run_until("the dark to be built", |app| app.dark.is_some());
+
+    let dark = harness.app.dark.clone().unwrap();
+    assert_eq!(dark.frames, 4);
+    assert!(harness.app.subtract_dark, "it starts in use once taken");
+    assert_eq!(
+        harness.app.dark_mismatch(),
+        None,
+        "the settings have not changed, so it applies"
+    );
+
+    // Recordings must still be raw. A subtracted frame would have had the
+    // pattern removed; the file must not.
+    let run = dir.join("run");
+    harness.app.send(WorkerCommand::StartRecording(
+        firstlight_core::worker::RecordRequest::new(run.join("light_0001.fits"))
+            .limit(Some(firstlight_core::RecordLimit::frames(2))),
+    ));
+    harness.run_until("the run to finish", |app| {
+        app.last_saved.as_ref().is_some_and(|p| p == &run)
+    });
+    assert_eq!(std::fs::read_dir(&run).unwrap().count(), 2);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_dark_stops_being_used_when_the_settings_change() {
+    // A dark is only valid for the exposure, gain and offset it was taken
+    // at. Applying it anyway would remove a pattern the frames do not have.
+    let mut harness = Harness::new();
+    harness.connect();
+    harness.app.send(WorkerCommand::SetControl {
+        id: firstlight_core::ControlId::ExposureUs,
+        value: 3_000,
+    });
+    harness.app.send(WorkerCommand::StartStream);
+    harness.run_until("a frame on screen", |app| app.texture.is_some());
+
+    harness.app.dark_frames = 3;
+    harness.app.take_darks();
+    harness.run_until("the dark to be built", |app| app.dark.is_some());
+    harness.run_until("it to be in use", |app| app.dark_mismatch().is_none());
+
+    // Double the exposure: twice the dark current, so the dark no longer
+    // describes what the sensor is doing.
+    harness.app.send(WorkerCommand::SetControl {
+        id: firstlight_core::ControlId::ExposureUs,
+        value: 6_000,
+    });
+    harness.run_until("the dark to be set aside", |app| {
+        matches!(
+            app.dark_mismatch(),
+            Some(firstlight_core::dark::DarkMismatch::Exposure { .. })
+        )
+    });
+    // Kept rather than thrown away: going back to the old exposure makes it
+    // usable again without taking another set.
+    assert!(harness.app.dark.is_some());
+}

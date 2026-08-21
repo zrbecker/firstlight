@@ -468,6 +468,7 @@ fn display_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
             "Percentile histogram stretch, applied to the on-screen copy only. \
              Recorded and saved frames are never stretched.",
         );
+    dark_controls(app, ui);
     ui.horizontal(|ui| {
         ui.label("Stack");
         ui.add(
@@ -533,6 +534,120 @@ fn display_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
             RichText::new(format!("preview gains R {r:.2}  G {g:.2}  B {b:.2}"))
                 .small()
                 .color(Color32::GRAY),
+        );
+    }
+}
+
+/// Taking a master dark, and subtracting it from the preview.
+///
+/// A three-step flow on purpose: the middle step exists because the camera
+/// has to be physically covered and only the person in the room can do that.
+fn dark_controls(app: &mut FirstLightApp, ui: &mut egui::Ui) {
+    let connected = app.connected();
+
+    // Driven by what this app asked for, not by the status: the status is
+    // published separately and lags the finished master by a frame or two,
+    // which left the progress line on screen after the dark was already in
+    // use. The count still comes from the worker when it has caught up.
+    if app.taking_darks {
+        let (taken, total) = app.status.dark_progress.unwrap_or((0, app.dark_frames));
+        ui.label(
+            RichText::new(format!("taking darks — {taken} of {total}"))
+                .color(Color32::from_rgb(255, 170, 120)),
+        );
+        if ui.small_button("Cancel").clicked() {
+            app.taking_darks = false;
+            app.send(WorkerCommand::CancelDark);
+        }
+        return;
+    }
+
+    if app.confirming_darks {
+        egui::Frame::NONE
+            .fill(Color32::from_rgb(70, 82, 104))
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .corner_radius(egui::CornerRadius::same(4))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("Cover the camera, then press Take darks.")
+                        .color(Color32::WHITE)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(
+                        "A cap, the scope's cover, or foil over the nosepiece. \
+                         Anything that lets light in makes the dark wrong.",
+                    )
+                    .small()
+                    .color(Color32::WHITE),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Take darks").clicked() {
+                        app.take_darks();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        app.confirming_darks = false;
+                    }
+                });
+            });
+        return;
+    }
+
+    // Read what the dark says about itself before the closure, so its borrow
+    // is over before Clear needs `app` mutably.
+    let summary = app.dark.as_ref().map(|dark| {
+        format!(
+            "{} frames at {:.3}s, gain {}",
+            dark.frames,
+            dark.exposure().as_secs_f32(),
+            dark.gain
+        )
+    });
+
+    let mut start_confirming = false;
+    let mut clear = false;
+    ui.horizontal(|ui| match &summary {
+        None => {
+            if ui
+                .add_enabled(connected, egui::Button::new("Take darks"))
+                .on_hover_text(
+                    "Average some frames with the camera covered, then subtract \
+                     them from the preview. Removes the fixed pattern a sensor \
+                     produces with no light — which a deep stack makes more \
+                     obvious, not less. Preview only; recordings stay raw.",
+                )
+                .clicked()
+            {
+                start_confirming = true;
+            }
+            ui.add(
+                egui::DragValue::new(&mut app.dark_frames)
+                    .range(1..=128)
+                    .speed(1.0)
+                    .suffix(" frames"),
+            )
+            .on_hover_text("More frames make a smoother dark, which adds less noise back.");
+        }
+        Some(summary) => {
+            ui.checkbox(&mut app.subtract_dark, "Subtract dark");
+            clear = ui.small_button("Clear").clicked();
+            ui.label(RichText::new(summary).small().color(Color32::GRAY));
+        }
+    });
+    if start_confirming {
+        app.confirming_darks = true;
+    }
+    if clear {
+        app.clear_dark();
+    }
+
+    // A dark only applies to the settings it was taken at, and silently
+    // doing nothing would be the worst of both worlds.
+    if let Some(mismatch) = app.dark_mismatch() {
+        ui.label(
+            RichText::new(format!("dark not in use — {mismatch}"))
+                .small()
+                .color(Color32::from_rgb(230, 180, 80)),
         );
     }
 }
@@ -715,6 +830,14 @@ fn image_area(app: &mut FirstLightApp, ui: &mut egui::Ui) {
             .on_hover_text("The preview is colour-balanced; recordings are not.");
         }
         // So a smooth picture is never mistaken for a single clean frame.
+        if app.dark.is_some() && app.subtract_dark && app.dark_mismatch().is_none() {
+            ui.label(
+                RichText::new("dark")
+                    .small()
+                    .color(Color32::from_rgb(150, 170, 210)),
+            )
+            .on_hover_text("The preview has a dark subtracted; recordings do not.");
+        }
         if app.stack_depth > 1 {
             ui.label(
                 RichText::new(format!("stack x{}", app.stacked_frames))

@@ -35,6 +35,7 @@
 
 pub mod camera;
 pub mod control;
+pub mod dark;
 pub mod display;
 pub mod error;
 pub mod event;
@@ -52,6 +53,7 @@ pub mod simulator;
 
 pub use camera::{Backend, Camera, CameraId, CameraInfo};
 pub use control::{Binning, BitDepth, ControlId, ControlInfo, Roi, WhiteBalance};
+pub use dark::MasterDark;
 pub use display::{DisplayImage, DisplayOptions, Stretch};
 pub use error::{Error, Result};
 pub use event::CameraEvent;

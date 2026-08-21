@@ -25,6 +25,7 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 
 use crate::camera::{Camera, CameraId, CameraInfo};
 use crate::control::{Binning, BitDepth, ControlId, ControlInfo, Roi, WhiteBalance};
+use crate::dark::MasterDark;
 use crate::error::{Error, Result};
 use crate::event::CameraEvent;
 use crate::format::fits::{FitsMetadata, write_fits};
@@ -157,6 +158,13 @@ pub enum WorkerCommand {
     },
     /// Ask the camera to measure and store its own white balance.
     AutoWhiteBalance,
+    /// Collect frames for a master dark. The camera must be covered; nothing
+    /// here can check that, so the caller is responsible for asking.
+    CaptureDark {
+        frames: usize,
+    },
+    /// Abandon a dark in progress.
+    CancelDark,
     /// Keep trying to re-open the camera after a device loss.
     SetAutoReconnect(bool),
     Shutdown,
@@ -243,6 +251,9 @@ pub struct WorkerStatus {
     pub temperature_c: Option<f32>,
     /// Set when the stream has gone quiet for longer than it should have.
     pub stalled: bool,
+    /// Frames collected so far for a master dark, and how many were asked
+    /// for. `None` when no dark is being taken.
+    pub dark_progress: Option<(usize, usize)>,
     /// What the camera says each of its controls is currently set to.
     ///
     /// Read from the device rather than assumed, because a camera keeps its
@@ -266,6 +277,7 @@ impl Default for WorkerStatus {
             recording: None,
             temperature_c: None,
             stalled: false,
+            dark_progress: None,
             control_values: BTreeMap::new(),
         }
     }
@@ -296,6 +308,14 @@ pub enum WorkerUpdate {
     },
     /// A file was written.
     Saved { path: PathBuf, frames: u64 },
+    /// A dark capture ended, carrying the master if one was built and
+    /// `None` if it was cancelled or abandoned. Sent exactly once per
+    /// capture, whatever the outcome, so a client showing progress always
+    /// learns that it is over — the status is not enough on its own,
+    /// because it arrives separately and a moment later. Boxed because a
+    /// master carries a frame's worth of pixels and this enum travels
+    /// through a channel constantly.
+    DarkFinished(Option<Box<MasterDark>>),
     /// The worker has stopped; no further updates will arrive.
     Stopped,
 }
@@ -513,6 +533,11 @@ struct Worker {
     desired: Vec<(ControlId, i64)>,
 
     recording: Option<Recording>,
+    /// Frames gathered so far towards a master dark, with the target count.
+    dark: Option<(Vec<Frame>, usize)>,
+    /// Whether the stream was already running when the dark started, so it
+    /// can be left as it was found.
+    dark_was_streaming: bool,
     /// Path to write the next frame to as FITS.
     pending_snap: Option<PathBuf>,
 
@@ -553,6 +578,8 @@ impl Worker {
             last_readonly_refresh: None,
             desired: Vec::new(),
             recording: None,
+            dark: None,
+            dark_was_streaming: false,
             pending_snap: None,
             frames_received: 0,
             frame_times: std::collections::VecDeque::new(),
@@ -724,6 +751,8 @@ impl Worker {
                 }
             }
             WorkerCommand::AutoWhiteBalance => self.auto_white_balance(),
+            WorkerCommand::CaptureDark { frames } => self.start_dark(frames),
+            WorkerCommand::CancelDark => self.finish_dark(None),
             WorkerCommand::SetAutoReconnect(on) => {
                 self.auto_reconnect = on;
                 self.next_reconnect = match (on, &self.state) {
@@ -763,6 +792,78 @@ impl Worker {
             green: *self.control_values.get(&ControlId::WbGreen)?,
             blue: *self.control_values.get(&ControlId::WbBlue)?,
         })
+    }
+
+    /// Begin collecting frames for a master dark.
+    ///
+    /// The camera must already be covered. Nothing here can verify that from
+    /// a single frame — a dim scene and a covered sensor look alike until you
+    /// see the whole picture — so the master checks itself once it is built
+    /// and says so if it looks wrong.
+    fn start_dark(&mut self, frames: usize) {
+        let frames = frames.clamp(1, 256);
+        self.dark = Some((Vec::with_capacity(frames), frames));
+        self.dark_was_streaming = self.streaming();
+        if !self.dark_was_streaming
+            && self
+                .with_camera("start stream for darks", |camera| camera.start_streaming())
+                .is_none()
+        {
+            self.finish_dark(None);
+            return;
+        }
+        self.publish_status();
+    }
+
+    /// Add a frame to the dark in progress, and build the master once enough
+    /// have arrived.
+    fn collect_dark(&mut self, frame: &Frame) {
+        // Only frames that describe themselves: a dark taken across a
+        // settings change would be an average of two different cameras.
+        if !frame.meta.settings_settled {
+            return;
+        }
+        let done = match self.dark.as_mut() {
+            Some((frames, target)) => {
+                frames.push(frame.clone());
+                frames.len() >= *target
+            }
+            None => return,
+        };
+        if done {
+            let (frames, _) = self.dark.take().expect("checked just above");
+            match MasterDark::from_frames(&frames) {
+                Ok(dark) => self.finish_dark(Some(dark)),
+                Err(e) => {
+                    self.fail("master dark", &e);
+                    self.finish_dark(None);
+                }
+            }
+        } else {
+            self.publish_status();
+        }
+    }
+
+    /// Publish a finished master, or clean up an abandoned one, and put the
+    /// stream back the way it was found.
+    fn finish_dark(&mut self, dark: Option<MasterDark>) {
+        self.dark = None;
+        if let Some(dark) = dark {
+            if let Some(complaint) = dark.looks_covered(u16::MAX) {
+                let _ = self.updates.send(WorkerUpdate::Event(CameraEvent::Warning {
+                    message: complaint,
+                }));
+            }
+            let _ = self
+                .updates
+                .send(WorkerUpdate::DarkFinished(Some(Box::new(dark))));
+        } else {
+            let _ = self.updates.send(WorkerUpdate::DarkFinished(None));
+        }
+        if !self.dark_was_streaming {
+            self.with_camera("stop stream after darks", |camera| camera.stop_streaming());
+        }
+        self.publish_status();
     }
 
     fn enumerate(&mut self) {
@@ -918,6 +1019,7 @@ impl Worker {
                 self.note_frame_time();
                 self.record_frame(&frame);
                 self.snap_frame(&frame);
+                self.collect_dark(&frame);
                 // Display last: recording must never be starved by the UI.
                 self.frames.push(frame);
             }
@@ -1339,6 +1441,10 @@ impl Worker {
             }),
             temperature_c: temperature,
             stalled: self.stall_reported,
+            dark_progress: self
+                .dark
+                .as_ref()
+                .map(|(frames, target)| (frames.len(), *target)),
             control_values: self.control_values.clone(),
         };
         let _ = self.updates.send(WorkerUpdate::Status(Box::new(status)));
