@@ -134,6 +134,7 @@ fn capture_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
     ui.heading("Capture");
     ui.add_space(4.0);
     let connected = app.connected();
+    let recording = app.status.recording.clone();
 
     ui.horizontal(|ui| {
         if app.status.streaming {
@@ -160,50 +161,121 @@ fn capture_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
         }
     });
 
+    ui.add_space(6.0);
+
+    // The frames are named from this, so `light_0001.fits` gives
+    // `light_0001.fits`, `light_0002.fits` and so on.
     ui.horizontal(|ui| {
-        let recording = app.status.recording.is_some();
-        if recording {
+        ui.label("Save to");
+        ui.add_enabled(
+            recording.is_none(),
+            egui::TextEdit::singleline(&mut app.output_dir).desired_width(f32::INFINITY),
+        )
+        .on_hover_text("Directory the captured frames go into");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Name");
+        ui.add_enabled(
+            recording.is_none(),
+            egui::TextEdit::singleline(&mut app.file_pattern).desired_width(f32::INFINITY),
+        )
+        .on_hover_text(
+            "Name of the first file. The digits set where the numbering starts \
+             and how wide it is, so light_0001.fits gives light_0002.fits next. \
+             Existing files are never overwritten.",
+        );
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Frames");
+        ui.add_enabled(
+            recording.is_none(),
+            egui::DragValue::new(&mut app.capture_frames)
+                .range(0..=1_000_000)
+                .speed(1.0)
+                .custom_formatter(|v, _| {
+                    if v < 1.0 {
+                        "until stopped".to_string()
+                    } else {
+                        format!("{v:.0}")
+                    }
+                }),
+        )
+        .on_hover_text("How many frames to keep. Zero runs until you stop it.");
+
+        ui.label("Delay");
+        ui.add_enabled(
+            recording.is_none(),
+            egui::DragValue::new(&mut app.capture_delay_s)
+                .range(0.0..=3600.0)
+                .speed(0.1)
+                .suffix(" s"),
+        )
+        .on_hover_text(
+            "Idle time between exposures. The period between saved frames is \
+             the exposure plus this, so a 1 s exposure with a 2 s delay keeps \
+             one frame every 3 s. Frames in between still reach the live view.",
+        );
+    });
+
+    ui.horizontal(|ui| {
+        if recording.is_some() {
             if ui
-                .button(RichText::new("Stop recording").color(Color32::from_rgb(255, 140, 140)))
+                .button(RichText::new("Stop capture").color(Color32::from_rgb(255, 140, 140)))
                 .clicked()
             {
                 app.send(WorkerCommand::StopRecording);
             }
         } else if ui
-            .add_enabled(connected, egui::Button::new("Record SER"))
-            .on_hover_text("Write every frame to a SER file; the live view keeps its own copy")
+            .add_enabled(connected, egui::Button::new("Start capture"))
+            .on_hover_text(
+                "Write frames as FITS files, one per frame, each with its own \
+                 exposure, gain and white balance in the header.",
+            )
             .clicked()
         {
-            let path = app.output_path("ser");
-            app.send(WorkerCommand::StartRecording { path, limit: None });
+            let request = app.capture_request();
+            app.send(WorkerCommand::StartRecording(request));
         }
     });
 
-    ui.horizontal(|ui| {
-        ui.label("Save to");
-        ui.add(
-            egui::TextEdit::singleline(&mut app.output_dir)
-                .desired_width(ui.available_width() - 8.0),
-        );
-    });
-
-    if let Some(recording) = app.status.recording.clone() {
+    if let Some(recording) = recording {
+        let limit = recording
+            .limit
+            .and_then(|limit| limit.frames)
+            .map(|frames| format!(" of {frames}"))
+            .unwrap_or_default();
         ui.label(
             RichText::new(format!(
-                "recording {} — {} frames, {}, {:.0}s",
-                recording
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default(),
+                "capturing — {} frame{}{}, {}, {:.0}s",
                 recording.frames,
+                if recording.frames == 1 { "" } else { "s" },
+                limit,
                 format_bytes(recording.bytes),
                 recording.elapsed.as_secs_f32()
             ))
             .color(Color32::from_rgb(255, 170, 120)),
         );
-    }
-    if let Some(saved) = &app.last_saved {
+        if let Some(next_in) = recording.next_in {
+            ui.label(
+                RichText::new(format!("next frame in {:.1}s", next_in.as_secs_f32()))
+                    .small()
+                    .color(Color32::GRAY),
+            );
+        }
+        if let Some(last) = &recording.last_file {
+            ui.label(
+                RichText::new(format!(
+                    "wrote {}",
+                    last.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                ))
+                .small()
+                .color(Color32::GRAY),
+            );
+        }
+    } else if let Some(saved) = &app.last_saved {
         ui.label(
             RichText::new(format!("last saved: {}", saved.display()))
                 .small()

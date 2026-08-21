@@ -19,6 +19,7 @@ use firstlight_core::camera::{Camera, CameraInfo};
 use firstlight_core::control::ControlId;
 use firstlight_core::error::{Error, Result};
 use firstlight_core::format::fits::FitsMetadata;
+use firstlight_core::format::sequence::FitsSequenceWriter;
 use firstlight_core::format::ser::{SerMetadata, SerWriter};
 use firstlight_core::registry::Registry;
 use firstlight_core::write_fits;
@@ -61,6 +62,8 @@ fn run(cli: Cli) -> Result<()> {
             select,
             settings,
             output,
+            format,
+            delay,
             frames,
             duration,
             observer,
@@ -70,6 +73,8 @@ fn run(cli: Cli) -> Result<()> {
             &settings,
             CaptureOptions {
                 output,
+                format,
+                delay,
                 frames,
                 duration,
                 observer,
@@ -187,6 +192,8 @@ fn info(select: &Select) -> Result<()> {
 
 struct CaptureOptions {
     output: std::path::PathBuf,
+    format: args::CaptureFormat,
+    delay: Duration,
     frames: Option<u64>,
     duration: Option<Duration>,
     observer: String,
@@ -199,22 +206,25 @@ fn capture(select: &Select, settings: &Settings, options: CaptureOptions) -> Res
     apply(camera.as_mut(), settings)?;
 
     let interrupted = install_interrupt_handler();
-    let mut writer = SerWriter::create(
-        &options.output,
-        SerMetadata {
-            observer: options.observer.clone(),
-            instrument: info.display_name.clone(),
-            telescope: options.telescope.clone(),
-            little_endian_flag: false,
-        },
-    )?;
+    let mut sink = Sink::open(&info, &mut camera, &options)?;
 
     println!(
         "Recording {} to {} (Ctrl-C to stop)",
         info.display_name,
-        options.output.display()
+        sink.describe()
     );
+    if !options.delay.is_zero() {
+        println!(
+            "Keeping one frame every exposure + {:?}; the rest are discarded.",
+            options.delay
+        );
+    }
     camera.start_streaming()?;
+
+    // Absolute schedule, advanced by whole periods, so a delay that is a
+    // multiple of the frame period cannot slip by one every time. Anchored on
+    // the first frame kept, not on the moment the stream started.
+    let mut next_due: Option<Instant> = None;
 
     let started = Instant::now();
     let mut written = 0u64;
@@ -236,7 +246,20 @@ fn capture(select: &Select, settings: &Settings, options: CaptureOptions) -> Res
 
         match camera.next_frame(settings.timeout) {
             Ok(frame) => {
-                writer.write_frame(&frame)?;
+                let exposure = Duration::from_micros(frame.meta.exposure_us);
+                if !options.delay.is_zero() {
+                    let now = Instant::now();
+                    if next_due.is_some_and(|due| now + exposure / 2 < due) {
+                        continue;
+                    }
+                    let period = (exposure + options.delay).max(Duration::from_millis(1));
+                    let mut due = next_due.unwrap_or(now) + period;
+                    while due <= now {
+                        due += period;
+                    }
+                    next_due = Some(due);
+                }
+                sink.write_frame(&frame)?;
                 written += 1;
                 progress.frame(&frame);
                 progress.maybe_print(written, camera.dropped_frames());
@@ -251,7 +274,7 @@ fn capture(select: &Select, settings: &Settings, options: CaptureOptions) -> Res
     };
 
     let _ = camera.stop_streaming();
-    let frames = writer.finish()?;
+    let frames = sink.finish()?;
     println!(
         "\nWrote {frames} frame(s) to {} in {:.1}s ({} dropped by the camera)",
         options.output.display(),
@@ -429,6 +452,73 @@ fn apply(camera: &mut dyn Camera, settings: &Settings) -> Result<()> {
         camera.bit_depth()?
     );
     Ok(())
+}
+
+/// Where a capture run's frames go.
+enum Sink {
+    Ser(Box<SerWriter>),
+    Fits(Box<FitsSequenceWriter>),
+}
+
+impl Sink {
+    fn open(
+        info: &CameraInfo,
+        camera: &mut Box<dyn Camera>,
+        options: &CaptureOptions,
+    ) -> Result<Sink> {
+        Ok(match options.format {
+            args::CaptureFormat::Ser => Sink::Ser(Box::new(SerWriter::create(
+                &options.output,
+                SerMetadata {
+                    observer: options.observer.clone(),
+                    instrument: info.display_name.clone(),
+                    telescope: options.telescope.clone(),
+                    little_endian_flag: false,
+                },
+            )?)),
+            args::CaptureFormat::Fits => {
+                let meta = FitsMetadata {
+                    instrument: info.display_name.clone(),
+                    observer: options.observer.clone(),
+                    telescope: options.telescope.clone(),
+                    pixel_size_um: Some(info.pixel_size_um),
+                    // The camera applies these to the raw data itself, so the
+                    // files have to record them.
+                    white_balance: camera.white_balance().ok(),
+                    ..FitsMetadata::default()
+                };
+                let writer = FitsSequenceWriter::create(&options.output, meta)?;
+                if writer.skipped_existing() {
+                    println!(
+                        "Files already exist there; this run starts at number {}.",
+                        writer.first_index()
+                    );
+                }
+                Sink::Fits(Box::new(writer))
+            }
+        })
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Sink::Ser(writer) => writer.path().display().to_string(),
+            Sink::Fits(writer) => format!("{}/", writer.directory().display()),
+        }
+    }
+
+    fn write_frame(&mut self, frame: &firstlight_core::Frame) -> Result<()> {
+        match self {
+            Sink::Ser(writer) => writer.write_frame(frame),
+            Sink::Fits(writer) => writer.write_frame(frame).map(|_| ()),
+        }
+    }
+
+    fn finish(self) -> Result<u64> {
+        match self {
+            Sink::Ser(writer) => writer.finish().map(u64::from),
+            Sink::Fits(writer) => Ok(writer.frames()),
+        }
+    }
 }
 
 /// `still.fits` with count 3 becomes `still_0001.fits`, `still_0002.fits`, ...

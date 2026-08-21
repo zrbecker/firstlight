@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   there is nothing to install by hand. Verified against a real SV305C Pro.
 - Backends can explain why they see nothing (`Backend::unavailable_reason`),
   which the GUI and CLI both surface.
+- Capture writes a numbered run of FITS files rather than a SER video. The
+  name of the first file sets where the numbering starts and how wide it is,
+  so `light_0001.fits` is followed by `light_0002.fits`; existing files are
+  skipped, never overwritten. The number of frames can be left open, and a
+  delay between exposures spaces the run out — a one second exposure with a
+  two second delay keeps one frame every three seconds. SER is still
+  available from the CLI with `--format ser`.
 - The live view says when it is stopped. A still picture could mean stopped,
   stalled, lost or connecting, and all four looked the same. The frame itself
   is left untouched — it is usually the reason the view was stopped — and a

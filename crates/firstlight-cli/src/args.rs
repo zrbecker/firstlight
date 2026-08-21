@@ -26,6 +26,16 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// What `capture` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CaptureFormat {
+    /// One FITS file per frame, each with its own acquisition header.
+    Fits,
+    /// A single SER video file. Compact, but it records no exposure, gain or
+    /// white balance.
+    Ser,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// List every attached camera.
@@ -48,11 +58,23 @@ pub enum Command {
         #[command(flatten)]
         settings: Settings,
 
-        /// Where to write the SER file.
+        /// Name of the first file, e.g. captures/m42/light_0001.fits. The
+        /// digits set where the numbering starts and how wide it is; existing
+        /// files are skipped rather than overwritten. For --format ser this
+        /// is the single output file.
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Stop after this many frames.
+        /// What to write: one FITS file per frame, or a single SER video.
+        #[arg(long, value_enum, default_value_t = CaptureFormat::Fits)]
+        format: CaptureFormat,
+
+        /// Idle time between exposures, e.g. 2s. The period between saved
+        /// frames is the exposure plus this.
+        #[arg(long, value_parser = parse_duration, default_value = "0s")]
+        delay: Duration,
+
+        /// Stop after this many frames. Omit to run until interrupted.
         #[arg(short = 'n', long)]
         frames: Option<u64>,
 

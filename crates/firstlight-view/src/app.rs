@@ -10,7 +10,8 @@ use firstlight_core::display::{DisplayOptions, Stretch};
 use firstlight_core::frame::FrameMeta;
 use firstlight_core::registry::Registry;
 use firstlight_core::worker::{
-    ConnectionState, WorkerCommand, WorkerHandle, WorkerStatus, WorkerUpdate, timestamped_name,
+    ConnectionState, RecordLimit, RecordRequest, WorkerCommand, WorkerHandle, WorkerStatus,
+    WorkerUpdate, timestamped_name,
 };
 
 use crate::render::Renderer;
@@ -132,6 +133,13 @@ pub struct FirstLightApp {
     pub bit_depth_choice: BitDepth,
 
     pub output_dir: String,
+    /// Name of the first file in a capture run; its digits set where the
+    /// numbering starts and how wide it is.
+    pub file_pattern: String,
+    /// Frames to keep, or zero to run until stopped.
+    pub capture_frames: u64,
+    /// Idle time between exposures, in seconds.
+    pub capture_delay_s: f32,
     pub last_saved: Option<PathBuf>,
     pub auto_reconnect: bool,
 }
@@ -173,6 +181,9 @@ impl FirstLightApp {
             binning_choice: Binning::ONE,
             bit_depth_choice: BitDepth::SIXTEEN,
             output_dir,
+            file_pattern: "light_0001.fits".to_string(),
+            capture_frames: 0,
+            capture_delay_s: 0.0,
             last_saved: None,
             auto_reconnect: true,
         }
@@ -251,6 +262,18 @@ impl FirstLightApp {
             self.pending.remove(&id);
             self.send(WorkerCommand::SetControl { id, value });
         }
+    }
+
+    /// The capture run described by the fields in the panel.
+    pub fn capture_request(&self) -> RecordRequest {
+        let pattern = if self.file_pattern.trim().is_empty() {
+            "light_0001.fits"
+        } else {
+            self.file_pattern.trim()
+        };
+        RecordRequest::new(PathBuf::from(&self.output_dir).join(pattern))
+            .limit((self.capture_frames > 0).then(|| RecordLimit::frames(self.capture_frames)))
+            .delay(Duration::from_secs_f32(self.capture_delay_s.max(0.0)))
     }
 
     pub fn output_path(&self, extension: &str) -> PathBuf {

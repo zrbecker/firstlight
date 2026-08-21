@@ -28,6 +28,7 @@ use crate::control::{Binning, BitDepth, ControlId, ControlInfo, Roi, WhiteBalanc
 use crate::error::{Error, Result};
 use crate::event::CameraEvent;
 use crate::format::fits::{FitsMetadata, write_fits};
+use crate::format::sequence::FitsSequenceWriter;
 use crate::format::ser::{SerMetadata, SerWriter};
 use crate::frame::Frame;
 use crate::registry::Registry;
@@ -77,6 +78,61 @@ impl RecordLimit {
     }
 }
 
+/// What a recording writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecordFormat {
+    /// One FITS file per frame, numbered from a template. Each file carries
+    /// the full acquisition header, which is what makes a run self-describing.
+    #[default]
+    FitsSequence,
+    /// A single SER video file. Compact and what planetary stacking software
+    /// expects, but it has nowhere to record exposure, gain or white balance.
+    Ser,
+}
+
+/// Everything a recording run needs to know.
+#[derive(Debug, Clone)]
+pub struct RecordRequest {
+    pub format: RecordFormat,
+    /// For a FITS sequence, the template for the first file, e.g.
+    /// `~/captures/m42/light_0001.fits`. For SER, the file itself.
+    pub path: PathBuf,
+    /// Stop after this many frames or this long. `None` runs until stopped.
+    pub limit: Option<RecordLimit>,
+    /// Idle time between one exposure ending and the next being kept.
+    ///
+    /// Zero saves every frame the camera delivers. Anything else makes the
+    /// period between saved frames `exposure + delay`, so a one second
+    /// exposure with a two second delay is kept every three seconds.
+    pub delay: Duration,
+}
+
+impl RecordRequest {
+    pub fn new(path: impl Into<PathBuf>) -> RecordRequest {
+        RecordRequest {
+            format: RecordFormat::default(),
+            path: path.into(),
+            limit: None,
+            delay: Duration::ZERO,
+        }
+    }
+
+    pub fn limit(mut self, limit: Option<RecordLimit>) -> RecordRequest {
+        self.limit = limit;
+        self
+    }
+
+    pub fn delay(mut self, delay: Duration) -> RecordRequest {
+        self.delay = delay;
+        self
+    }
+
+    pub fn format(mut self, format: RecordFormat) -> RecordRequest {
+        self.format = format;
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum WorkerCommand {
     /// Re-enumerate every backend.
@@ -92,11 +148,8 @@ pub enum WorkerCommand {
     SetRoi(Roi),
     SetBinning(Binning),
     SetBitDepth(BitDepth),
-    /// Begin writing frames to a SER file.
-    StartRecording {
-        path: PathBuf,
-        limit: Option<RecordLimit>,
-    },
+    /// Begin recording frames.
+    StartRecording(RecordRequest),
     StopRecording,
     /// Save the next frame as FITS.
     Snap {
@@ -157,11 +210,17 @@ pub struct CameraSettings {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingProgress {
+    /// The SER file, or the directory a FITS sequence is filling.
     pub path: PathBuf,
+    /// The most recent file written, for a sequence.
+    pub last_file: Option<PathBuf>,
+    pub format: RecordFormat,
     pub frames: u64,
     pub bytes: u64,
     pub elapsed: Duration,
     pub limit: Option<RecordLimit>,
+    /// Time until the next frame is due to be kept, when a delay is set.
+    pub next_in: Option<Duration>,
 }
 
 /// A snapshot of everything a UI needs to render, published periodically.
@@ -336,12 +395,85 @@ impl Drop for WorkerHandle {
     }
 }
 
+/// Where a recording's frames are going.
+enum RecordingSink {
+    Ser(SerWriter),
+    FitsSequence(Box<FitsSequenceWriter>),
+}
+
 struct Recording {
-    writer: SerWriter,
+    sink: RecordingSink,
+    /// The SER file, or the directory of a FITS sequence.
     path: PathBuf,
+    format: RecordFormat,
     frames: u64,
     started: Instant,
     limit: Option<RecordLimit>,
+    /// Gap the user asked for between exposures; zero keeps every frame.
+    delay: Duration,
+    /// When the next frame is due to be kept, once the run has started.
+    /// Held as an absolute time and advanced by whole periods, so the cadence
+    /// cannot drift. `None` until the first frame anchors the grid.
+    next_due: Option<Instant>,
+}
+
+impl Recording {
+    fn bytes(&self) -> u64 {
+        match &self.sink {
+            RecordingSink::Ser(writer) => writer.bytes_written(),
+            RecordingSink::FitsSequence(writer) => writer.bytes_written(),
+        }
+    }
+
+    fn last_file(&self) -> Option<PathBuf> {
+        match &self.sink {
+            RecordingSink::Ser(_) => None,
+            RecordingSink::FitsSequence(writer) => {
+                writer.last_written().map(|path| path.to_path_buf())
+            }
+        }
+    }
+
+    /// Whether this frame is the one to keep, given the cadence.
+    ///
+    /// The camera free-runs whatever delay is asked for, so a delay is served
+    /// by discarding frames rather than by idling the sensor — stopping and
+    /// restarting a stream is not reliable enough to do between exposures.
+    /// The tolerance matters: with a delay that is a whole multiple of the
+    /// frame period, a frame arriving a millisecond early would otherwise be
+    /// skipped and the cadence would slip by a full period every time.
+    fn due(&self, now: Instant, exposure: Duration) -> bool {
+        if self.delay.is_zero() {
+            return true;
+        }
+        match self.next_due {
+            // The first frame starts the run, and the grid starts with it.
+            None => true,
+            Some(due) => now + exposure / 2 >= due,
+        }
+    }
+
+    fn period(&self, exposure: Duration) -> Duration {
+        exposure + self.delay
+    }
+
+    /// Move the due time on by whole periods, catching up if frames were
+    /// missed so the schedule stays on its original grid.
+    fn advance(&mut self, now: Instant, exposure: Duration) {
+        let period = self.period(exposure).max(Duration::from_millis(1));
+        let mut due = self.next_due.unwrap_or(now) + period;
+        while due <= now {
+            due += period;
+        }
+        self.next_due = Some(due);
+    }
+
+    fn next_in(&self, now: Instant) -> Option<Duration> {
+        if self.delay.is_zero() {
+            return None;
+        }
+        Some(self.next_due?.saturating_duration_since(now))
+    }
 }
 
 struct Worker {
@@ -580,7 +712,7 @@ impl Worker {
                     self.publish_status();
                 }
             }
-            WorkerCommand::StartRecording { path, limit } => self.start_recording(path, limit),
+            WorkerCommand::StartRecording(request) => self.start_recording(request),
             WorkerCommand::StopRecording => self.finish_recording("stopped by request"),
             WorkerCommand::Snap { path } => {
                 self.pending_snap = Some(path);
@@ -861,10 +993,24 @@ impl Worker {
     }
 
     fn record_frame(&mut self, frame: &Frame) {
+        let exposure = Duration::from_micros(frame.meta.exposure_us);
         let Some(recording) = self.recording.as_mut() else {
             return;
         };
-        if let Err(e) = recording.writer.write_frame(frame) {
+
+        // A frame arriving inside the gap the user asked for is discarded
+        // rather than written; it still reaches the live view.
+        let now = Instant::now();
+        if !recording.due(now, exposure) {
+            return;
+        }
+        recording.advance(now, exposure);
+
+        let written = match &mut recording.sink {
+            RecordingSink::Ser(writer) => writer.write_frame(frame),
+            RecordingSink::FitsSequence(writer) => writer.write_frame(frame).map(|_| ()),
+        };
+        if let Err(e) = written {
             let message = e.to_string();
             self.finish_recording("write error");
             let _ = self.updates.send(WorkerUpdate::Failed {
@@ -919,21 +1065,57 @@ impl Worker {
         }
     }
 
-    fn start_recording(&mut self, path: PathBuf, limit: Option<RecordLimit>) {
+    fn start_recording(&mut self, request: RecordRequest) {
         self.finish_recording("superseded by a new recording");
         let instrument = self
             .info
             .as_ref()
             .map(|i| i.display_name.clone())
             .unwrap_or_default();
-        match SerWriter::create(&path, SerMetadata::for_camera(instrument)) {
-            Ok(writer) => {
+
+        let opened = match request.format {
+            RecordFormat::Ser => {
+                SerWriter::create(&request.path, SerMetadata::for_camera(instrument))
+                    .map(|writer| (RecordingSink::Ser(writer), request.path.clone()))
+            }
+            RecordFormat::FitsSequence => {
+                let meta = FitsMetadata {
+                    instrument,
+                    pixel_size_um: self.info.as_ref().map(|i| i.pixel_size_um),
+                    white_balance: self.white_balance_snapshot(),
+                    ..FitsMetadata::default()
+                };
+                FitsSequenceWriter::create(&request.path, meta).map(|writer| {
+                    let directory = writer.directory().to_path_buf();
+                    (RecordingSink::FitsSequence(Box::new(writer)), directory)
+                })
+            }
+        };
+
+        match opened {
+            Ok((sink, path)) => {
+                if let RecordingSink::FitsSequence(writer) = &sink
+                    && writer.skipped_existing()
+                {
+                    // Their frames will not be numbered where they asked, and
+                    // finding that out afterwards would be worse.
+                    let _ = self.updates.send(WorkerUpdate::Event(CameraEvent::Warning {
+                        message: format!(
+                            "files already exist there; this run starts at number {}",
+                            writer.first_index()
+                        ),
+                    }));
+                }
+                let now = Instant::now();
                 self.recording = Some(Recording {
-                    writer,
+                    sink,
                     path,
+                    format: request.format,
                     frames: 0,
-                    started: Instant::now(),
-                    limit,
+                    started: now,
+                    limit: request.limit,
+                    delay: request.delay,
+                    next_due: None,
                 });
                 // Recording without a stream would silently produce nothing.
                 if !self.streaming() {
@@ -960,12 +1142,18 @@ impl Worker {
         };
         let path = recording.path.clone();
         let frames = recording.frames;
-        tracing::info!(path = %path.display(), frames, reason, "finalising SER recording");
-        match recording.writer.finish() {
+        tracing::info!(path = %path.display(), frames, reason, "finishing recording");
+        let outcome = match recording.sink {
+            // SER needs its header patched with the frame count; a sequence
+            // of FITS files is complete as soon as the last one is written.
+            RecordingSink::Ser(writer) => writer.finish().map(u64::from),
+            RecordingSink::FitsSequence(writer) => Ok(writer.frames()),
+        };
+        match outcome {
             Ok(written) => {
                 let _ = self.updates.send(WorkerUpdate::Saved {
                     path,
-                    frames: u64::from(written),
+                    frames: written,
                 });
             }
             Err(e) => {
@@ -1131,10 +1319,13 @@ impl Worker {
             display_dropped: self.frames.dropped(),
             recording: self.recording.as_ref().map(|r| RecordingProgress {
                 path: r.path.clone(),
+                last_file: r.last_file(),
+                format: r.format,
                 frames: r.frames,
-                bytes: r.writer.bytes_written(),
+                bytes: r.bytes(),
                 elapsed: r.started.elapsed(),
                 limit: r.limit,
+                next_in: r.next_in(Instant::now()),
             }),
             temperature_c: temperature,
             stalled: self.stall_reported,

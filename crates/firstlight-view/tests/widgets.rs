@@ -312,3 +312,34 @@ fn clearing_the_image_sticks() {
         "a cleared live view should not still be painting a frame"
     );
 }
+
+#[test]
+fn the_capture_panel_offers_the_naming_count_and_delay() {
+    let mut ui = Ui::new();
+    ui.connect();
+    ui.frame();
+    for label in ["Save to", "Name", "Frames", "Delay", "Start capture"] {
+        assert!(ui.shows(label), "{label:?} missing from {:#?}", ui.painted);
+    }
+    // Zero frames reads as unlimited rather than as a literal zero.
+    assert!(ui.shows("until stopped"), "painted: {:#?}", ui.painted);
+}
+
+#[test]
+fn a_running_capture_offers_a_stop_button() {
+    let mut ui = Ui::new();
+    let directory = std::env::temp_dir().join(format!("firstlight-ui-{}", std::process::id()));
+    ui.connect();
+    ui.app.output_dir = directory.display().to_string();
+    ui.app.file_pattern = "light_0001.fits".into();
+    ui.app.capture_frames = 0;
+
+    let request = ui.app.capture_request();
+    ui.app.send(WorkerCommand::StartRecording(request));
+    ui.run_until("the capture to start", |ui| ui.shows("Stop capture"));
+    assert!(!ui.shows("Start capture"), "both buttons are showing");
+
+    ui.app.send(WorkerCommand::StopRecording);
+    ui.run_until("the capture to stop", |ui| ui.shows("Start capture"));
+    std::fs::remove_dir_all(&directory).ok();
+}

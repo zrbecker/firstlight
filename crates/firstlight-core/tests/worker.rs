@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use firstlight_core::simulator::{SimHandle, SimulatorBackend};
 use firstlight_core::worker::{
-    ConnectionState, RecordLimit, WorkerCommand, WorkerHandle, WorkerStatus, WorkerUpdate,
+    ConnectionState, RecordFormat, RecordLimit, RecordRequest, WorkerCommand, WorkerHandle,
+    WorkerStatus, WorkerUpdate,
 };
 use firstlight_core::{Backend, BayerPattern, ControlId, PixelFormat, Registry, Roi};
 
@@ -139,6 +140,11 @@ impl Session {
     }
 }
 
+/// A directory of its own for a capture run, so runs cannot collide.
+fn temp_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("firstlight-run-{}-{name}", std::process::id()))
+}
+
 fn temp_path(name: &str) -> std::path::PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!("firstlight-worker-{}-{name}", std::process::id()));
@@ -221,6 +227,147 @@ fn an_invalid_control_value_is_reported_and_does_not_kill_the_worker() {
 }
 
 #[test]
+fn a_capture_run_writes_one_numbered_fits_file_per_frame() {
+    let mut session = Session::new();
+    let directory = temp_dir("sequence");
+    session.connect();
+    session.send(WorkerCommand::SetControl {
+        id: ControlId::ExposureUs,
+        value: 2_000,
+    });
+    let from = session.mark();
+    session.send(WorkerCommand::StartRecording(
+        RecordRequest::new(directory.join("light_0001.fits")).limit(Some(RecordLimit::frames(4))),
+    ));
+
+    let update = session.wait_update("the run to finish", from, |u| {
+        matches!(u, WorkerUpdate::Saved { .. })
+    });
+    let WorkerUpdate::Saved { frames, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(frames, 4);
+
+    let mut written: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    written.sort();
+    assert_eq!(
+        written,
+        vec![
+            "light_0001.fits",
+            "light_0002.fits",
+            "light_0003.fits",
+            "light_0004.fits"
+        ]
+    );
+    // Each file stands on its own, header and all.
+    let bytes = std::fs::read(directory.join("light_0003.fits")).unwrap();
+    assert!(bytes.starts_with(b"SIMPLE  ="));
+    assert_eq!(bytes.len() % 2880, 0);
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+#[test]
+fn a_capture_run_never_overwrites_frames_that_are_already_there() {
+    let mut session = Session::new();
+    let directory = temp_dir("no-overwrite");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("light_0001.fits"), b"an earlier night").unwrap();
+
+    session.connect();
+    session.send(WorkerCommand::SetControl {
+        id: ControlId::ExposureUs,
+        value: 2_000,
+    });
+    let from = session.mark();
+    session.send(WorkerCommand::StartRecording(
+        RecordRequest::new(directory.join("light_0001.fits")).limit(Some(RecordLimit::frames(2))),
+    ));
+    session.wait_update("the run to finish", from, |u| {
+        matches!(u, WorkerUpdate::Saved { .. })
+    });
+
+    assert_eq!(
+        std::fs::read(directory.join("light_0001.fits")).unwrap(),
+        b"an earlier night",
+        "frames from a previous session must survive"
+    );
+    assert!(directory.join("light_0002.fits").exists());
+    assert!(directory.join("light_0003.fits").exists());
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+#[test]
+fn a_delay_spaces_the_kept_frames_out() {
+    // The camera keeps free-running; the delay is served by discarding
+    // frames, so the live view still updates at full rate.
+    let mut session = Session::new();
+    let directory = temp_dir("cadence");
+    session.connect();
+    session.send(WorkerCommand::SetControl {
+        id: ControlId::ExposureUs,
+        value: 20_000,
+    });
+    session.wait_status("the exposure to apply", |s| {
+        s.settings.exposure_us == 20_000
+    });
+
+    let started = Instant::now();
+    let from = session.mark();
+    session.send(WorkerCommand::StartRecording(
+        RecordRequest::new(directory.join("f_001.fits"))
+            .limit(Some(RecordLimit::frames(3)))
+            // Period becomes exposure + delay = 220 ms.
+            .delay(Duration::from_millis(200)),
+    ));
+    session.wait_update("the run to finish", from, |u| {
+        matches!(u, WorkerUpdate::Saved { .. })
+    });
+    let elapsed = started.elapsed();
+
+    // Three frames at 220 ms apart is two gaps, so at least 440 ms. Without
+    // the delay the simulator would deliver all three in under 100 ms.
+    assert!(
+        elapsed >= Duration::from_millis(400),
+        "three frames 220ms apart took only {elapsed:?}; the delay was ignored"
+    );
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 3);
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+#[test]
+fn a_capture_run_can_go_on_until_it_is_stopped() {
+    let mut session = Session::new();
+    let directory = temp_dir("until-stopped");
+    session.connect();
+    session.send(WorkerCommand::SetControl {
+        id: ControlId::ExposureUs,
+        value: 2_000,
+    });
+    let from = session.mark();
+    // No limit at all.
+    session.send(WorkerCommand::StartRecording(RecordRequest::new(
+        directory.join("light_0001.fits"),
+    )));
+    session.wait_status("frames to accumulate", |s| {
+        s.recording.as_ref().is_some_and(|r| r.frames >= 3)
+    });
+
+    session.send(WorkerCommand::StopRecording);
+    let update = session.wait_update("the run to finish", from, |u| {
+        matches!(u, WorkerUpdate::Saved { .. })
+    });
+    let WorkerUpdate::Saved { frames, .. } = update else {
+        unreachable!()
+    };
+    assert!(frames >= 3, "expected the frames captured before the stop");
+    session.wait_status("the recording to clear", |s| s.recording.is_none());
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+#[test]
 fn recording_writes_a_ser_file_and_reports_progress() {
     let mut session = Session::new();
     let path = temp_path("record.ser");
@@ -230,10 +377,11 @@ fn recording_writes_a_ser_file_and_reports_progress() {
         value: 2_000,
     });
     let from = session.mark();
-    session.send(WorkerCommand::StartRecording {
-        path: path.clone(),
-        limit: Some(RecordLimit::frames(5)),
-    });
+    session.send(WorkerCommand::StartRecording(
+        RecordRequest::new(path.clone())
+            .format(RecordFormat::Ser)
+            .limit(Some(RecordLimit::frames(5))),
+    ));
 
     let update = session.wait_update("saved recording", from, |u| {
         matches!(u, WorkerUpdate::Saved { .. })
@@ -350,10 +498,9 @@ fn an_interrupted_recording_still_leaves_a_readable_file() {
         value: 2_000,
     });
     let from = session.mark();
-    session.send(WorkerCommand::StartRecording {
-        path: path.clone(),
-        limit: None,
-    });
+    session.send(WorkerCommand::StartRecording(
+        RecordRequest::new(path.clone()).format(RecordFormat::Ser),
+    ));
     session.wait_status("recording progress", |s| {
         s.recording.as_ref().is_some_and(|r| r.frames >= 2)
     });
@@ -434,10 +581,11 @@ fn a_slow_consumer_loses_display_frames_but_not_recorded_ones() {
         value: 1_000,
     });
     let from = session.mark();
-    session.send(WorkerCommand::StartRecording {
-        path: path.clone(),
-        limit: Some(RecordLimit::frames(12)),
-    });
+    session.send(WorkerCommand::StartRecording(
+        RecordRequest::new(path.clone())
+            .format(RecordFormat::Ser)
+            .limit(Some(RecordLimit::frames(12))),
+    ));
 
     // Never call `latest_frame`: the display queue is one deep, so most
     // frames must be dropped there while every one still reaches the file.

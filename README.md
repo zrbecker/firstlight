@@ -30,7 +30,8 @@ default:
 
 ```sh
 cargo run -p firstlight-cli -- list
-cargo run -p firstlight-cli -- capture -e 5ms -n 200 -o moon.ser
+cargo run -p firstlight-cli -- capture -e 5ms -n 200 -o run/light_0001.fits
+cargo run -p firstlight-cli -- capture -e 1s --delay 2s -o run/light_0001.fits
 cargo run -p firstlight-cli -- snap  -e 2s --bits 16 -o m42.fits
 cargo run -p firstlight-view          # the GUI, binary name `firstlight`
 ```

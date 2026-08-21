@@ -6,9 +6,11 @@
 //! and baking it into a recording throws away data you cannot get back.
 
 pub mod fits;
+pub mod sequence;
 pub mod ser;
 
 pub use fits::{FitsMetadata, write_fits};
+pub use sequence::{FileSequence, FitsSequenceWriter};
 pub use ser::{SerColorId, SerMetadata, SerWriter};
 
 /// Copy `src` into a fixed-size, space-padded ASCII field, the way both SER

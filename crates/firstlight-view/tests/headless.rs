@@ -261,19 +261,23 @@ fn recording_and_snapshots_write_files_from_the_ui() {
             .is_some_and(|p| p.extension().is_some_and(|e| e == "fits"))
     });
 
-    let ser_path = harness.app.output_path("ser");
-    harness.app.send(WorkerCommand::StartRecording {
-        path: ser_path.clone(),
-        limit: Some(firstlight_core::RecordLimit::frames(4)),
-    });
-    harness.run_until("the recording to finish", |app| {
-        app.last_saved.as_ref().is_some_and(|p| p == &ser_path)
+    // And a capture run, which writes one FITS file per frame.
+    let run = dir.join("run");
+    harness.app.send(WorkerCommand::StartRecording(
+        firstlight_core::worker::RecordRequest::new(run.join("light_0001.fits"))
+            .limit(Some(firstlight_core::RecordLimit::frames(4))),
+    ));
+    harness.run_until("the capture run to finish", |app| {
+        app.last_saved.as_ref().is_some_and(|p| p == &run)
     });
 
-    let bytes = std::fs::read(&ser_path).unwrap();
-    assert_eq!(&bytes[0..14], b"LUCAM-RECORDER");
-    // 178 byte header + 4 frames of 64x48x2 + 4 timestamps.
-    assert_eq!(bytes.len(), 178 + 4 * 64 * 48 * 2 + 4 * 8);
+    let mut written: Vec<String> = std::fs::read_dir(&run)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    written.sort();
+    assert_eq!(written.len(), 4, "wrote {written:?}");
+    assert_eq!(written[0], "light_0001.fits");
     std::fs::remove_dir_all(&dir).ok();
 }
 
