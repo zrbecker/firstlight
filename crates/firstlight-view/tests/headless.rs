@@ -557,9 +557,9 @@ fn the_preview_white_balance_keeps_responding_while_settings_change() {
         let mut matched = false;
         while Instant::now() < deadline {
             harness.frame();
-            let levels = harness.app.last_channel_levels;
-            let per_channel = levels[0] != levels[1] || levels[1] != levels[2];
-            if per_channel == wanted {
+            let gains = harness.app.last_channel_gains;
+            let correcting = gains != [1.0; 3];
+            if correcting == wanted {
                 matched = true;
                 break;
             }
@@ -567,9 +567,9 @@ fn the_preview_white_balance_keeps_responding_while_settings_change() {
         }
         assert!(
             matched,
-            "round {round}: preview balance {} but channel levels are {:?}",
+            "round {round}: preview balance {} but the gains are {:?}",
             if wanted { "on" } else { "off" },
-            harness.app.last_channel_levels
+            harness.app.last_channel_gains
         );
     }
 }

@@ -114,9 +114,9 @@ pub struct FirstLightApp {
     pub last_meta: Option<FrameMeta>,
     /// Levels the last auto-stretch settled on, shown in the UI.
     pub last_levels: (u16, u16),
-    /// Per-channel levels from the last render, so the preview balance can
+    /// Per-channel gains from the last render, so the preview balance can
     /// show what it is applying.
-    pub last_channel_levels: [(u16, u16); 3],
+    pub last_channel_gains: [f32; 3],
     display_times: VecDeque<Instant>,
 
     pub auto_stretch: bool,
@@ -170,7 +170,7 @@ impl FirstLightApp {
             texture: None,
             last_meta: None,
             last_levels: (0, 0),
-            last_channel_levels: [(0, 0); 3],
+            last_channel_gains: [1.0; 3],
             display_times: VecDeque::new(),
             auto_stretch: true,
             white_balance_preview: true,
@@ -309,7 +309,7 @@ impl FirstLightApp {
         self.texture = None;
         self.last_meta = None;
         self.last_levels = (0, 0);
-        self.last_channel_levels = [(0, 0); 3];
+        self.last_channel_gains = [1.0; 3];
     }
 
     /// Notice a renderer that has stopped, say so, and start another.
@@ -466,7 +466,7 @@ impl FirstLightApp {
         };
         let image = rendered.image;
         self.last_levels = (image.black, image.white);
-        self.last_channel_levels = image.channel_levels;
+        self.last_channel_gains = image.channel_gains;
         self.last_meta = Some(rendered.meta);
 
         let colour = egui::ColorImage::from_rgba_unmultiplied(

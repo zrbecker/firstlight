@@ -35,15 +35,16 @@ impl Stretch {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DisplayOptions {
     pub stretch: Stretch,
-    /// Stretch each colour channel against its own histogram, so the picture
-    /// on screen looks neutral whatever the light.
+    /// Scale the colour channels to match each other, so the picture on
+    /// screen looks neutral whatever the light.
     ///
     /// This is a *preview* white balance and nothing else: it never touches
     /// what gets recorded or saved. It exists because a live view that swings
     /// green in a hallway and red at a monitor is unusable for framing and
-    /// focusing, which is why other capture software does the same thing. The
-    /// levels it applies are reported in [`DisplayImage::channel_levels`] so
-    /// the correction is visible rather than silent.
+    /// focusing, which is why other capture software does the same thing. It
+    /// applies whatever the stretch is set to, and the gains it uses are
+    /// reported in [`DisplayImage::channel_gains`] so the correction is
+    /// visible rather than silent.
     pub white_balance_preview: bool,
     /// Debayer colour frames for display. Off shows the raw mosaic, which is
     /// useful for checking focus and for spotting a wrong Bayer phase.
@@ -80,11 +81,10 @@ pub struct DisplayImage {
     pub black: u16,
     /// White point actually applied, raw sample units.
     pub white: u16,
-    /// The levels applied to each channel. Identical to the pair above unless
-    /// the preview white balance is on, in which case they are what makes the
-    /// picture neutral — and worth showing, so the correction is never
-    /// invisible.
-    pub channel_levels: [(u16, u16); 3],
+    /// The gain the preview white balance applied to each channel, relative
+    /// to green. All ones when it is off. Reported so the correction can be
+    /// shown rather than being invisible.
+    pub channel_gains: [f32; 3],
 }
 
 impl DisplayImage {
@@ -125,13 +125,8 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
     let full_scale = frame.meta.bit_depth.max_value() as u16;
 
     let mut rgb: Vec<[u16; 3]> = Vec::with_capacity(out_w as usize * out_h as usize);
-    // Histogram of luminance, accumulated as the pixels are read so they are
-    // only walked once.
-    //
-    // Luminance rather than per-channel, deliberately: stretching each
-    // channel separately would white-balance the picture, and a live view
-    // that quietly corrects a colour cast stops you noticing that the
-    // camera's own white balance wants setting.
+    // Histograms accumulated as the pixels are read, so they are walked once:
+    // one of luminance for the stretch, and one per channel for the balance.
     let mut histogram = vec![0u32; BINS];
     let mut channels = [vec![0u32; BINS], vec![0u32; BINS], vec![0u32; BINS]];
     let bin_scale = (BINS - 1) as f32 / f32::from(full_scale.max(1));
@@ -202,20 +197,19 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
         }
     }
 
-    let (black, white) = levels(&histogram, rgb.len(), options.stretch, full_scale);
-    // Each channel stretched against its own histogram is what neutralises a
-    // cast: whatever the red response was, its own top percentile maps to
-    // white just as green's does.
-    let channel_levels = if options.white_balance_preview {
-        [
-            levels(&channels[0], rgb.len(), options.stretch, full_scale),
-            levels(&channels[1], rgb.len(), options.stretch, full_scale),
-            levels(&channels[2], rgb.len(), options.stretch, full_scale),
-        ]
+    // Two separate steps, deliberately. White balance is a per-channel
+    // correction of colour; the stretch is one tonal map applied to every
+    // channel alike. Deriving the balance *from* the stretch — which is how
+    // this was first written — quietly makes it do nothing whenever the
+    // stretch is not itself derived from the data, so the toggle had no
+    // effect at all unless auto stretch happened to be on.
+    let correction = if options.white_balance_preview {
+        channel_correction(&channels, rgb.len(), full_scale)
     } else {
-        [(black, white); 3]
+        ChannelCorrection::none()
     };
-    let rgba = map_to_rgba(&rgb, channel_levels, options.gamma);
+    let (black, white) = levels(&histogram, rgb.len(), options.stretch, full_scale);
+    let rgba = map_to_rgba(&rgb, &correction, black, white, options.gamma);
 
     DisplayImage {
         width: out_w,
@@ -223,7 +217,69 @@ pub fn render(frame: &Frame, options: &DisplayOptions) -> DisplayImage {
         rgba,
         black,
         white,
-        channel_levels,
+        channel_gains: correction.gains,
+    }
+}
+
+/// A per-channel affine correction that puts every channel on the same scale.
+struct ChannelCorrection {
+    /// Black point to subtract from each channel.
+    black: [f32; 3],
+    /// Scale applied to each channel, relative to green.
+    gains: [f32; 3],
+    /// Green's black point, added back so the overall level is unchanged.
+    pedestal: f32,
+}
+
+impl ChannelCorrection {
+    fn none() -> ChannelCorrection {
+        ChannelCorrection {
+            black: [0.0; 3],
+            gains: [1.0; 3],
+            pedestal: 0.0,
+        }
+    }
+}
+
+/// Percentiles used to judge the balance. Fixed rather than taken from the
+/// stretch: what counts as neutral is a property of the picture, not of how
+/// it is being displayed.
+const WB_LOW_PCT: f32 = 0.5;
+const WB_HIGH_PCT: f32 = 99.95;
+
+/// Work out what each channel needs to be scaled by to match green.
+///
+/// Green is the reference because a Bayer sensor has twice as much of it, so
+/// its statistics are the steadiest and leaving it alone keeps the overall
+/// brightness where it was.
+fn channel_correction(
+    channels: &[Vec<u32>; 3],
+    pixels: usize,
+    full_scale: u16,
+) -> ChannelCorrection {
+    if pixels == 0 {
+        return ChannelCorrection::none();
+    }
+    let stretch = Stretch::AutoPercentile {
+        low_pct: WB_LOW_PCT,
+        high_pct: WB_HIGH_PCT,
+    };
+    let measured: Vec<(u16, u16)> = channels
+        .iter()
+        .map(|channel| levels(channel, pixels, stretch, full_scale))
+        .collect();
+
+    let span =
+        |index: usize| f32::from(measured[index].1.saturating_sub(measured[index].0)).max(1.0);
+    let reference = span(1);
+    ChannelCorrection {
+        black: [
+            f32::from(measured[0].0),
+            f32::from(measured[1].0),
+            f32::from(measured[2].0),
+        ],
+        gains: [reference / span(0), 1.0, reference / span(2)],
+        pedestal: f32::from(measured[1].0),
     }
 }
 
@@ -293,22 +349,32 @@ fn levels(histogram: &[u32], pixels: usize, stretch: Stretch, full_scale: u16) -
     }
 }
 
-fn map_to_rgba(rgb: &[[u16; 3]], levels: [(u16, u16); 3], gamma: f32) -> Vec<u8> {
-    let scale: Vec<(f32, f32)> = levels
-        .iter()
-        .map(|(black, white)| {
-            (
-                f32::from(*black),
-                f32::from(white.saturating_sub(*black)).max(1.0),
-            )
-        })
-        .collect();
+/// Map raw samples to 8-bit, balancing the channels and then stretching.
+///
+/// Both steps are affine, so they collapse into one multiply and add per
+/// channel: `t = value * scale + offset`.
+fn map_to_rgba(
+    rgb: &[[u16; 3]],
+    correction: &ChannelCorrection,
+    black: u16,
+    white: u16,
+    gamma: f32,
+) -> Vec<u8> {
+    let span = f32::from(white.saturating_sub(black)).max(1.0);
+    let black = f32::from(black);
+    let mut scale = [0f32; 3];
+    let mut offset = [0f32; 3];
+    for index in 0..3 {
+        let gain = correction.gains[index];
+        scale[index] = gain / span;
+        offset[index] = (correction.pedestal - black - correction.black[index] * gain) / span;
+    }
+
     let apply_gamma = (gamma - 1.0).abs() > 1e-3 && gamma > 0.0;
     let mut out = Vec::with_capacity(rgb.len() * 4);
     for px in rgb {
         for (index, channel) in px.iter().enumerate() {
-            let (black, span) = scale[index];
-            let mut t = ((f32::from(*channel) - black) / span).clamp(0.0, 1.0);
+            let mut t = (f32::from(*channel) * scale[index] + offset[index]).clamp(0.0, 1.0);
             if apply_gamma {
                 t = t.powf(gamma);
             }

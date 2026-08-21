@@ -46,7 +46,16 @@ fn nearest_neighbour_debayer_recovers_the_channel_values() {
         BayerPattern::Gbrg,
     ] {
         let frame = bayer_frame(pattern, 200, 120, 60);
-        let image = display::render(&frame, &DisplayOptions::default());
+        // The balance is off here: this is testing that the debayer puts each
+        // colour in the right place, and a correction would equalise exactly
+        // the differences being checked.
+        let image = display::render(
+            &frame,
+            &DisplayOptions {
+                white_balance_preview: false,
+                ..DisplayOptions::default()
+            },
+        );
         assert_eq!((image.width, image.height), (2, 2), "{pattern}");
         for pixel in image.rgba.chunks(4) {
             assert_eq!(
@@ -122,6 +131,8 @@ fn manual_levels_clip_where_asked() {
             black: 100,
             white: 200,
         },
+        // Off: this is testing where the stretch clips, not the balance.
+        white_balance_preview: false,
         ..DisplayOptions::default()
     };
     let image = display::render(&frame, &options);
@@ -226,13 +237,14 @@ fn the_preview_white_balance_neutralises_a_cast_without_touching_the_frame() {
         (r - g).abs() < 6.0 && (g - b).abs() < 6.0,
         "expected a neutral preview, got r={r:.1} g={g:.1} b={b:.1}"
     );
-    // The correction is reported rather than hidden: red needed a higher
-    // white point than green, which is the cast measured.
+    // The correction is reported rather than hidden: red was twice green in
+    // the frame, so it is scaled down by about half.
     assert!(
-        image.channel_levels[0].1 > image.channel_levels[1].1,
-        "channel levels should record the correction: {:?}",
-        image.channel_levels
+        image.channel_gains[0] < 0.75 && image.channel_gains[2] > 1.5,
+        "gains should record the correction: {:?}",
+        image.channel_gains
     );
+    assert_eq!(image.channel_gains[1], 1.0, "green is the reference");
     assert_eq!(
         frame.data.to_vec(),
         before,
@@ -263,7 +275,55 @@ fn a_colour_cast_is_shown_rather_than_corrected() {
          r={r:.1} g={g:.1} b={b:.1}"
     );
     assert_eq!(
-        image.channel_levels[0], image.channel_levels[2],
-        "off means one set of levels for every channel"
+        image.channel_gains, [1.0; 3],
+        "off means no per-channel scaling at all"
     );
+}
+
+#[test]
+fn the_preview_white_balance_works_with_every_stretch() {
+    // The bug this exists for: white balance was implemented as per-channel
+    // stretching, so it silently did nothing whenever the stretch was not
+    // itself derived from the data. With a linear or manual stretch the
+    // toggle had no effect at all, which looked like the feature being
+    // randomly broken.
+    let frame = cast_frame();
+    for (name, stretch) in [
+        ("linear", Stretch::Linear),
+        ("auto", Stretch::auto()),
+        (
+            "manual",
+            Stretch::Manual {
+                black: 0,
+                white: 20_000,
+            },
+        ),
+    ] {
+        let on = display::render(
+            &frame,
+            &DisplayOptions {
+                stretch,
+                white_balance_preview: true,
+                ..DisplayOptions::default()
+            },
+        );
+        let off = display::render(
+            &frame,
+            &DisplayOptions {
+                stretch,
+                white_balance_preview: false,
+                ..DisplayOptions::default()
+            },
+        );
+        assert_ne!(
+            on.rgba, off.rgba,
+            "{name} stretch: the white balance toggle changed nothing"
+        );
+
+        let [r, g, b] = channel_means(&on.rgba);
+        assert!(
+            (r - g).abs() < 8.0 && (g - b).abs() < 8.0,
+            "{name} stretch: expected a neutral preview, got r={r:.1} g={g:.1} b={b:.1}"
+        );
+    }
 }

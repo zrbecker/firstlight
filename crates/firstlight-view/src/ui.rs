@@ -495,16 +495,11 @@ fn display_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
     // Show what the preview balance is actually doing, so the correction is
     // never invisible — that was the whole objection to having it at all.
     if app.white_balance_preview {
-        let [r, g, b] = app.last_channel_levels;
+        let [r, g, b] = app.last_channel_gains;
         ui.label(
-            RichText::new(format!(
-                "preview gains R {:.2}  G {:.2}  B {:.2}",
-                channel_gain(g, r),
-                1.0,
-                channel_gain(g, b)
-            ))
-            .small()
-            .color(Color32::GRAY),
+            RichText::new(format!("preview gains R {r:.2}  G {g:.2}  B {b:.2}"))
+                .small()
+                .color(Color32::GRAY),
         );
     }
 }
@@ -723,14 +718,6 @@ fn image_area(app: &mut FirstLightApp, ui: &mut egui::Ui) {
             target,
         )));
     });
-}
-
-/// How much a channel is being scaled relative to green, from the levels the
-/// preview balance chose for each.
-fn channel_gain(green: (u16, u16), channel: (u16, u16)) -> f32 {
-    let green_span = f32::from(green.1.saturating_sub(green.0)).max(1.0);
-    let span = f32::from(channel.1.saturating_sub(channel.0)).max(1.0);
-    green_span / span
 }
 
 fn state_badge(state: &ConnectionState) -> (Color32, String) {
