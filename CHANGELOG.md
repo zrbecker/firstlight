@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   stalled, lost or connecting, and all four looked the same. The frame itself
   is left untouched — it is usually the reason the view was stopped — and a
   "Clear image" button removes it when it is no longer wanted.
+- The live view can average the last few frames, which quietens the noise by
+  the square root of the count — a stack of four is twice as clean. Rolling
+  rather than cumulative, so a passing cloud or a knock to the mount clears
+  within the window. Preview only: recordings are always individual frames.
+  It does not align, so the frame count and the time span are shown alongside
+  and the live view is marked while it is on.
 - A preview white balance, on by default: each colour channel is stretched
   against its own histogram so the live view stays neutral wherever the camera
   is pointed, which is what other capture software does and what makes a live

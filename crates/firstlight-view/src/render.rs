@@ -17,8 +17,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use firstlight_core::display::{self, DisplayImage, DisplayOptions};
-use firstlight_core::frame::FrameMeta;
+use firstlight_core::frame::{Frame, FrameMeta};
 use firstlight_core::ring::FrameRing;
+use firstlight_core::stack::RollingStack;
 
 /// How long the renderer waits for a frame before looking at whether the
 /// display settings changed.
@@ -28,11 +29,19 @@ const POLL: Duration = Duration::from_millis(30);
 pub struct Rendered {
     pub image: DisplayImage,
     pub meta: FrameMeta,
+    /// How many frames the picture was averaged from, and over how long.
+    /// One frame and a zero span mean stacking is off or has just reset.
+    pub stacked: usize,
+    pub span: Duration,
 }
 
 struct Slot {
     latest: Mutex<Option<Rendered>>,
     options: Mutex<DisplayOptions>,
+    /// How many frames to average for the live view. Held apart from
+    /// `DisplayOptions` because stacking happens before rendering, not as
+    /// part of it.
+    stack_depth: Mutex<usize>,
     stop: AtomicBool,
     /// Cleared when the render loop leaves, including by unwinding, so the
     /// application can tell a stopped renderer from a quiet one.
@@ -54,6 +63,7 @@ impl Renderer {
         let slot = Arc::new(Slot {
             latest: Mutex::new(None),
             options: Mutex::new(options),
+            stack_depth: Mutex::new(1),
             stop: AtomicBool::new(false),
             alive: AtomicBool::new(true),
             forget: AtomicBool::new(false),
@@ -95,6 +105,15 @@ impl Renderer {
             .take()
     }
 
+    /// Average this many frames for the live view. One turns it off.
+    pub fn set_stack_depth(&self, depth: usize) {
+        *self
+            .slot
+            .stack_depth
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = depth;
+    }
+
     /// Forget the last frame, so nothing repaints it.
     ///
     /// Without this the renderer still holds the frame and redraws it the
@@ -133,6 +152,21 @@ impl Drop for Renderer {
     }
 }
 
+/// Add a frame to the stack and return what should be displayed.
+///
+/// Only frames that describe themselves are stacked. While a control is being
+/// adjusted the camera is still delivering frames exposed under the old
+/// settings, and averaging those with the new ones would show a blend of both
+/// — so the stack is left alone and the newest frame is shown as it is, which
+/// keeps the view live exactly when somebody is watching it to judge a
+/// change.
+fn stack_frame(stack: &mut RollingStack, frame: Frame) -> Frame {
+    if !frame.meta.settings_settled {
+        return frame;
+    }
+    stack.push(frame)
+}
+
 /// Marks the renderer as stopped however the loop leaves — returning, or
 /// unwinding from a panic.
 struct AliveUntilDropped(Arc<Slot>);
@@ -147,24 +181,35 @@ fn run(slot: Arc<Slot>, frames: Arc<FrameRing>) {
     let _alive = AliveUntilDropped(slot.clone());
     let mut last_frame = None;
     let mut last_options: Option<DisplayOptions> = None;
+    let mut stack = RollingStack::new(1);
 
     while !slot.stop.load(Ordering::SeqCst) {
-        // Drain: only the newest frame is worth rendering, and the ring is
-        // one deep anyway.
+        // Drain, stacking each frame as it arrives. Every frame that
+        // reaches this thread contributes, even the ones the display would
+        // otherwise skip past — they cost one add and one subtract each, and
+        // throwing them away would waste signal that is already in hand.
         let mut fresh = false;
         while let Some(frame) = frames.try_recv() {
-            last_frame = Some(frame);
+            last_frame = Some(stack_frame(&mut stack, frame));
             fresh = true;
         }
         if !fresh {
             if let Ok(frame) = frames.recv_timeout(POLL) {
-                last_frame = Some(frame);
+                last_frame = Some(stack_frame(&mut stack, frame));
                 fresh = true;
             }
         }
 
+        // Changing the depth takes effect on the next frame; shrinking keeps
+        // the newest frames rather than starting over.
+        let depth = *slot.stack_depth.lock().unwrap_or_else(|e| e.into_inner());
+        if depth != stack.depth() {
+            stack.set_depth(depth);
+        }
+
         if slot.forget.swap(false, Ordering::SeqCst) {
             last_frame = None;
+            stack.clear();
             *slot.latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
 
@@ -190,6 +235,8 @@ fn run(slot: Arc<Slot>, frames: Arc<FrameRing>) {
                 *slot.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(Rendered {
                     image,
                     meta: frame.meta.clone(),
+                    stacked: stack.len().max(1),
+                    span: stack.span(),
                 });
             }
             Err(payload) => {

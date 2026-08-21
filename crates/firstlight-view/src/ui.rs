@@ -468,6 +468,39 @@ fn display_section(app: &mut FirstLightApp, ui: &mut egui::Ui) {
             "Percentile histogram stretch, applied to the on-screen copy only. \
              Recorded and saved frames are never stretched.",
         );
+    ui.horizontal(|ui| {
+        ui.label("Stack");
+        ui.add(
+            egui::Slider::new(&mut app.stack_depth, 1..=firstlight_core::stack::MAX_DEPTH)
+                .clamping(egui::SliderClamping::Always)
+                .custom_formatter(|v, _| {
+                    if v <= 1.0 {
+                        "off".to_string()
+                    } else {
+                        format!("{v:.0} frames")
+                    }
+                }),
+        )
+        .on_hover_text(
+            "Average the last few frames for the live view, which quietens \
+             the noise by the square root of the count. Preview only — what \
+             gets recorded is always individual frames. Frames are averaged \
+             where they lie, with no alignment, so anything that moves \
+             between them will smear.",
+        );
+    });
+    if app.stack_depth > 1 {
+        ui.label(
+            RichText::new(format!(
+                "averaging {} frame{} over {:.1}s",
+                app.stacked_frames,
+                if app.stacked_frames == 1 { "" } else { "s" },
+                app.stacked_span.as_secs_f32()
+            ))
+            .small()
+            .color(Color32::GRAY),
+        );
+    }
     ui.checkbox(&mut app.white_balance_preview, "White balance preview")
         .on_hover_text(
             "Stretch each colour channel separately so the picture looks \
@@ -680,6 +713,15 @@ fn image_area(app: &mut FirstLightApp, ui: &mut egui::Ui) {
                     .color(Color32::from_rgb(150, 170, 210)),
             )
             .on_hover_text("The preview is colour-balanced; recordings are not.");
+        }
+        // So a smooth picture is never mistaken for a single clean frame.
+        if app.stack_depth > 1 {
+            ui.label(
+                RichText::new(format!("stack x{}", app.stacked_frames))
+                    .small()
+                    .color(Color32::from_rgb(150, 170, 210)),
+            )
+            .on_hover_text("The preview is averaged over several frames; recordings are not.");
         }
     });
     ui.add_space(4.0);

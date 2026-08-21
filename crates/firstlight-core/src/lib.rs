@@ -43,6 +43,7 @@ pub mod frame;
 pub mod registry;
 pub mod ring;
 pub mod settle;
+pub mod stack;
 pub mod time_util;
 pub mod worker;
 
@@ -59,6 +60,7 @@ pub use frame::{BayerPattern, Frame, FrameMeta, PixelFormat};
 pub use registry::Registry;
 pub use ring::{FrameRing, StreamStop};
 pub use settle::SettingsClock;
+pub use stack::RollingStack;
 pub use worker::{
     CameraSettings, ConnectionState, RecordLimit, WorkerCommand, WorkerHandle, WorkerStatus,
     WorkerUpdate,

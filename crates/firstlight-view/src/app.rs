@@ -120,6 +120,13 @@ pub struct FirstLightApp {
     display_times: VecDeque<Instant>,
 
     pub auto_stretch: bool,
+    /// How many frames the live view averages. One is off.
+    pub stack_depth: usize,
+    /// What the last render actually managed: frames averaged and the
+    /// wall-clock they span. Shown rather than assumed, because the renderer
+    /// stacks what reaches it and skips frames taken mid-adjustment.
+    pub stacked_frames: usize,
+    pub stacked_span: Duration,
     /// Neutralise the colour of the *preview* only. On by default: a live
     /// view that swings green in one direction and red in another cannot be
     /// used for framing or focusing.
@@ -173,6 +180,9 @@ impl FirstLightApp {
             last_channel_gains: [1.0; 3],
             display_times: VecDeque::new(),
             auto_stretch: true,
+            stack_depth: 1,
+            stacked_frames: 1,
+            stacked_span: Duration::ZERO,
             white_balance_preview: true,
             gamma: 1.0,
             debayer: true,
@@ -297,6 +307,7 @@ impl FirstLightApp {
         self.drain_updates();
         self.flush_pending_controls();
         self.check_renderer();
+        self.flush_stack_depth();
         self.update_texture(ctx);
     }
 
@@ -310,6 +321,8 @@ impl FirstLightApp {
         self.last_meta = None;
         self.last_levels = (0, 0);
         self.last_channel_gains = [1.0; 3];
+        self.stacked_frames = 1;
+        self.stacked_span = Duration::ZERO;
     }
 
     /// Notice a renderer that has stopped, say so, and start another.
@@ -317,6 +330,11 @@ impl FirstLightApp {
     /// Without this a dead render thread leaves the last image on screen
     /// indefinitely: the picture looks live, the display controls stop having
     /// any effect, and only restarting the application clears it.
+    /// Keep the renderer's stack depth in step with the panel.
+    fn flush_stack_depth(&mut self) {
+        self.renderer.set_stack_depth(self.stack_depth.max(1));
+    }
+
     fn check_renderer(&mut self) {
         if let Some(fault) = self.renderer.take_fault() {
             self.push_log(
@@ -465,6 +483,8 @@ impl FirstLightApp {
             return;
         };
         let image = rendered.image;
+        self.stacked_frames = rendered.stacked;
+        self.stacked_span = rendered.span;
         self.last_levels = (image.black, image.white);
         self.last_channel_gains = image.channel_gains;
         self.last_meta = Some(rendered.meta);

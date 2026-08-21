@@ -343,3 +343,24 @@ fn a_running_capture_offers_a_stop_button() {
     ui.run_until("the capture to stop", |ui| ui.shows("Start capture"));
     std::fs::remove_dir_all(&directory).ok();
 }
+
+#[test]
+fn the_stack_control_reaches_the_screen() {
+    let mut ui = Ui::new();
+    ui.connect();
+    ui.frame();
+    assert!(ui.shows("Stack"), "painted: {:#?}", ui.painted);
+    // Reads as "off" rather than a bare 1, and says nothing more until on.
+    assert!(ui.shows("off"), "painted: {:#?}", ui.painted);
+    assert!(!ui.shows("averaging"));
+
+    ui.app.stack_depth = 4;
+    ui.app.send(WorkerCommand::StartStream);
+    ui.run_until("the stack to fill", |ui| ui.app.stacked_frames >= 2);
+    ui.frame();
+    // What it is actually doing is on screen, not just what was asked for.
+    assert!(ui.shows("averaging"), "painted: {:#?}", ui.painted);
+    // And the live view is marked, so a smooth picture is never mistaken
+    // for a single clean frame.
+    assert!(ui.shows("stack x"), "painted: {:#?}", ui.painted);
+}

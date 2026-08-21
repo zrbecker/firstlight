@@ -613,3 +613,88 @@ fn a_stopped_renderer_is_noticed_reported_and_replaced() {
     // And it works again afterwards.
     harness.run_until("frames again", |app| app.texture.is_some());
 }
+
+#[test]
+fn stacking_averages_the_live_view_without_touching_recordings() {
+    let mut harness = Harness::new();
+    let dir = std::env::temp_dir().join(format!("firstlight-stack-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    harness.connect();
+    harness.app.send(WorkerCommand::SetControl {
+        id: firstlight_core::ControlId::ExposureUs,
+        value: 3_000,
+    });
+    harness.app.send(WorkerCommand::StartStream);
+    harness.run_until("a frame on screen", |app| app.texture.is_some());
+
+    // Off by default: one frame in, one frame shown.
+    assert_eq!(harness.app.stack_depth, 1);
+    harness.run_until("an unstacked frame", |app| app.stacked_frames == 1);
+
+    harness.app.stack_depth = 6;
+    harness.run_until("the stack to fill", |app| app.stacked_frames == 6);
+    assert!(
+        harness.app.stacked_span > Duration::ZERO,
+        "a filled stack spans some wall-clock time"
+    );
+
+    // A capture run taken while stacking must still write single frames.
+    let run = dir.join("run");
+    harness.app.send(WorkerCommand::StartRecording(
+        firstlight_core::worker::RecordRequest::new(run.join("light_0001.fits"))
+            .limit(Some(firstlight_core::RecordLimit::frames(3))),
+    ));
+    harness.run_until("the run to finish", |app| {
+        app.last_saved.as_ref().is_some_and(|p| p == &run)
+    });
+
+    for entry in std::fs::read_dir(&run).unwrap() {
+        let path = entry.unwrap().path();
+        let bytes = std::fs::read(&path).unwrap();
+        // 2880-byte header, then 64x48 samples at 16 bits. A stacked frame
+        // would be the same size, so check the exposure card instead: the
+        // stack reports its total integration, a single frame does not.
+        let header = String::from_utf8_lossy(&bytes[..2880]).to_string();
+        let exposure: f64 = header
+            .as_bytes()
+            .chunks(80)
+            .find(|card| card.starts_with(b"EXPTIME ="))
+            .map(|card| String::from_utf8_lossy(&card[10..]).to_string())
+            .and_then(|value| value.split('/').next().map(|v| v.trim().to_string()))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("no EXPTIME in {path:?}"));
+        assert!(
+            exposure < 0.01,
+            "a recorded frame should carry its own ~3ms exposure, not the \
+             stack's total; {path:?} says {exposure}s"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_geometry_change_restarts_the_stack_rather_than_mixing_shapes() {
+    let mut harness = Harness::new();
+    harness.connect();
+    harness.app.send(WorkerCommand::SetControl {
+        id: firstlight_core::ControlId::ExposureUs,
+        value: 3_000,
+    });
+    harness.app.stack_depth = 8;
+    harness.app.send(WorkerCommand::StartStream);
+    harness.run_until("the stack to fill", |app| app.stacked_frames >= 4);
+
+    harness
+        .app
+        .send(WorkerCommand::SetRoi(firstlight_core::Roi::new(
+            0, 0, 32, 32,
+        )));
+    harness.run_until("the smaller frames to arrive", |app| {
+        app.last_meta.as_ref().is_some_and(|m| m.width == 32)
+    });
+    // Frames of different sizes cannot be averaged, so it starts over and
+    // fills again rather than showing a mixture or falling over.
+    harness.run_until("the stack to refill at the new size", |app| {
+        app.stacked_frames >= 4 && app.last_meta.as_ref().is_some_and(|m| m.width == 32)
+    });
+}
