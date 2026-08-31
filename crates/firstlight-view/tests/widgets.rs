@@ -166,8 +166,17 @@ fn a_backend_that_cannot_see_anything_says_so_on_screen() {
 fn left_panel_extent(shapes: &[egui::epaint::ClippedShape]) -> f32 {
     let mut extent: f32 = 0.0;
     for clipped in shapes {
-        let rect = clipped.shape.visual_bounding_rect();
-        if rect.is_finite() && rect.min.x < 300.0 {
+        // Intersect with the clip rect: what matters is what egui actually
+        // paints, not how large the shape would be unclipped. The "Save to"
+        // field holds an absolute path, so its unclipped bounding box grows
+        // with the length of the working directory -- which made this test
+        // pass on a short checkout path and fail on a long one. egui was
+        // clipping it correctly all along.
+        let rect = clipped
+            .shape
+            .visual_bounding_rect()
+            .intersect(clipped.clip_rect);
+        if rect.is_finite() && rect.is_positive() && rect.min.x < 300.0 {
             extent = extent.max(rect.max.x);
         }
     }
